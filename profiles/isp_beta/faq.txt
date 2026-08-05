@@ -1,0 +1,89 @@
+============================================================
+UZBNET — TEZ-TEZ SO'RALADIGAN SAVOLLAR (FAQ)
+============================================================
+
+--- INTERNET VA TARMOQ ---
+
+1. Internet ishlamayapti, nima qilish kerak?
+→ Routeringizni 30 soniyaga o'chirib, qayta yoqing. Kabellar to'g'ri ulanganini tekshiring. Boshqa qurilmalarda ham internet ishlamayotganini tekshiring. Muammo davom etsa, texnik yordamga murojaat qiling.
+
+2. Internet tezligi past, nima sababdan?
+→ WiFi orqali tezlik kabelga nisbatan pastroq bo'lishi mumkin. Qurilmangiz virusli bo'lsa ham tezlik pasayadi. Speedtest o'tkazib, natijani bizga ayting. Agar kabelda ham past bo'lsa — texnik tekshiruv kerak.
+
+3. Router qanday sozlanadi?
+→ Router sozlamalari uchun brauzerga 192.168.1.1 yoki 192.168.0.1 manzilini kiriting. Login va parol odatda admin/admin yoki router orqasida yozilgan bo'ladi. WiFi nomi va parolini "Wireless" bo'limidan o'zgartirishingiz mumkin.
+
+4. WiFi parolini qanday o'zgartiraman?
+→ Router sozlamalariga kiring (192.168.1.1) → Wireless → Security → WiFi parolini o'zgartiring. O'zgartirgandan keyin barcha qurilmalar yangi parol bilan qayta ulanishi kerak.
+
+5. Bir nechta qurilmada internet sekin ishlayapti — nima qilish kerak?
+→ Bir vaqtning o'zida ko'p qurilma ulansa, tezlik taqsimlanadi. Router eski model bo'lsa, yangisiga almashtirishni tavsiya qilamiz. Tarifingizdagi tezlik yetarli emasligi ham mumkin — tarifni oshirish haqida o'ylab ko'ring.
+
+--- TARIF VA TO'LOV ---
+
+6. Tarifimni qanday almashtiraman?
+→ Shaxsiy kabinet orqali yoki operatorga murojaat qilib tarifni almashtirishingiz mumkin. Yangi tarif keyingi oydan kuchga kiradi. Tarif pastroqqa o'tganda tezlik kamayishini unutmang.
+
+7. Qanday tariflar mavjud?
+→ Hozirda "Start" (20 Mbit/s), "Comfort" (50 Mbit/s), "Premium" (100 Mbit/s), va "Ultra" (200 Mbit/s) tariflari mavjud. Har bir tarifga IPTV va boshqa xizmatlar qo'shish mumkin. Batafsil ma'lumot uchun veb-saytimizga tashrif buyuring.
+
+8. To'lovni qanday usullar bilan amalga oshirish mumkin?
+→ Payme, Click, UzCard/Humo kartalari, terminal to'lovlari, bank o'tkazmasi, shaxsiy kabinet orqali onlayn to'lov. Avtoto'lov xizmatini ulab, har oy avtomatik to'lov qilishingiz mumkin.
+
+9. Qarzdorlik haqida qanday bilib olaman?
+→ Shaxsiy kabinet orqali yoki *123# USSD buyrug'i orqali balans va qarzdorlikni tekshirishingiz mumkin. Operatorga murojaat qilib ham bilib olishingiz mumkin.
+
+10. To'lov qildim, lekin internet yoqilmadi — nega?
+→ To'lov tushishi uchun 5-15 daqiqa vaqt ketishi mumkin. Agar 30 daqiqadan keyin ham yoqilmagan bo'lsa, chek raqami bilan operatorga murojaat qiling.
+
+--- HISOB VA SHAXSIY KABINET ---
+
+11. Shaxsiy kabinetga qanday kiraman?
+→ my.uzbnet.uz sayti orqali shartnoma raqamingiz va parolingiz bilan kirasiz. Parolni unutgan bo'lsangiz, "Parolni tiklash" tugmasi orqali SMS orqali tiklang.
+
+12. Parolimni unutdim, nima qilaman?
+→ Parol faqat SMS orqali tiklanadi. Shaxsiy kabinetdagi "Parolni tiklash" bo'limi orqali ro'yxatdan o'tgan telefon raqamingizga kod yuboriladi. Operator parolingizni BILMAYDI va AYTA OLMAYDI.
+
+13. Shartnoma raqamimni qayerdan bilaman?
+→ Shartnoma raqamingiz shartnoma qog'ozida, to'lov chekida yoki oldingi SMS xabarnomalarda yozilgan bo'ladi. Operatorga murojaat qilib, shaxsingizni tasdiqlaganingizdan keyin bilib olishingiz mumkin.
+
+--- IPTV VA QO'SHIMCHA XIZMATLAR ---
+
+14. IPTV ishlamayapti — nima qilish kerak?
+→ Avvalo internet ishlayotganini tekshiring. IPTV pristavkasini qayta yoqing. Kabellarni tekshiring. Muammo davom etsa, texnik yordamga murojaat qiling.
+
+15. IPTV kanallari ro'yxatini qayerdan ko'rish mumkin?
+→ Shaxsiy kabinetda yoki veb-saytimizda mavjud. Operatorga murojaat qilib, tarifingizga mos kanallar ro'yxatini so'rashingiz mumkin.
+
+16. Statik IP-manzil nima va u nima uchun kerak?
+→ Statik IP — o'zgarmas internet manzil. CCTV kameralari, masofaviy ish, serverlar uchun kerak bo'ladi. Oylik qo'shimcha to'lov bilan ulanadi.
+
+17. WiFi qamrov zonasini kengaytirish mumkinmi?
+→ Ha, WiFi repeater yoki mesh-tizim orqali qamrov zonasini kengaytirish mumkin. Uskunalarni o'zingiz xarid qilishingiz yoki bizdan ijaraga olishingiz mumkin.
+
+--- TEXNIK MUAMMOLAR ---
+
+18. Optik kabel uzilib qoldi — nima qilaman?
+→ Darhol texnik yordamga murojaat qiling! Optik kabelni o'zingiz ulashga urinmang — bu xavfli va kafolatni bekor qiladi. Usta kelib tuzatib beradi.
+
+19. Internet kechki payt sekin ishlaydi — nega?
+→ Kechki payt (19:00-23:00) ko'p mijoz bir vaqtda internetdan foydalangani uchun tarmoq yuklamasi oshadi. Bu normal holat. Agar juda sekin bo'lsa, texnik yordamga murojaat qiling.
+
+20. Mening hududda avariya yoki profilaktika bormi?
+→ Bu haqida operatorga murojaat qilib, manzilingizni ayting. Tizimda hududingizdagi rejalashtirilgan ishlar yoki avariyalar haqida ma'lumot mavjud.
+
+--- AKSIYA VA CHEGIRMALAR ---
+
+21. Yangi mijozlar uchun qanday chegirmalar bor?
+→ Yangi mijozlar uchun birinchi oy 50% chegirma va bepul router taqdim etiladi. Aksiya muddati cheklangan bo'lishi mumkin — batafsil veb-saytda.
+
+22. Do'stimni taklif qilsam, bonus bormi?
+→ Ha, "Do'stingni taklif qil" aksiyasi mavjud. Taklif qilgan do'stingiz shartnoma tuzganda, sizga bir oylik to'lov summasi bonus sifatida taqdim etiladi.
+
+--- TICKET VA SHIKOYAT ---
+
+23. Ticket ochilgach, qachon javob beriladi?
+→ Odatda texnik muammolar 24 soat ichida hal qilinadi. Shoshilinch muammolar uchun usta 2-4 soat ichida yetib keladi. Ticket raqamini saqlab qo'ying — u orqali holatini tekshirishingiz mumkin.
+
+24. Xizmat sifati yoqmadi — qayerga shikoyat qilishim mumkin?
+→ Avvalo operatorga murojaat qilib muammoni tushuntiring. Yechilmasa, sifat nazorati bo'limiga (+998XXxxxXXxx) qo'ng'iroq qilishingiz yoki info@uzbnet.uz elektron manziliga yozishingiz mumkin.

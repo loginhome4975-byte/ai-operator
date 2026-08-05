@@ -1,0 +1,27 @@
+{
+  "company_id": "medline",
+  "name": "MedLine Klinikasi",
+  "domain": "Tibbiyot va sog'liqni saqlash",
+  "address": "Toshkent shahri, Amir Temur shoh ko'chasi 15-uy",
+  "phone": "+998 71 123 45 67",
+  "working_hours": "Dushanbadan Jumagacha, 09:00 - 18:00",
+  "departments": [
+    "Qabul bo'limi (umumiy savollar, navbatga yozish)",
+    "Laboratoriya (tahlil natijalari, topshirish tartibi)",
+    "Stomatologiya (tish davolash, protezlash)"
+  ],
+  "faq": [
+    {
+      "q": "Sizlarda MRT xizmati bormi?",
+      "a": "Yo'q, afsuski klinikamizda MRT xizmati mavjud emas, faqat UTT (Uzi) xizmatimiz bor."
+    },
+    {
+      "q": "Shifokor ko'rigi necha pul?",
+      "a": "Umumiy shifokor ko'rigi 150,000 so'm. Stomatolog ko'rigi esa 100,000 so'm."
+    },
+    {
+      "q": "Dam olish kunlari ishlaysizlarmi?",
+      "a": "Biz shanba va yakshanba kunlari ishlamaymiz."
+    }
+  ]
+}

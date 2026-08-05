@@ -1,0 +1,24 @@
+{
+    "company_name": "UzbNet",
+    "bot_name": "Aziza",
+    "crm_type": "dummy",
+    "language": "en",
+    "prompt_version": "v1",
+    "prompt_folder": "isp_en",
+    "llm": {
+        "temperature": 0.3,
+        "max_tokens": 512,
+        "top_p": 0.9,
+        "repeat_penalty": 1.1
+    },
+    "context": {
+        "max_history": 20,
+        "token_limit": 3000,
+        "session_ttl_seconds": 900
+    },
+    "greeting": {
+        "uz": "Mijoz aloqaga chiqdi. O'zingizni tanishtirib, qanday yordam berishingizni so'rang.",
+        "ru": "Клиент на связи. Представьтесь и спросите, чем вы можете помочь.",
+        "en": "The customer is on the line. Introduce yourself and ask how you can help."
+    }
+}

@@ -1,0 +1,16 @@
+## FAQ (Frequently Asked Questions)
+
+### 1. Internet not working at all
+Please unplug your router from power for 5 minutes, then plug it back in. Sometimes routers freeze up. If it still doesn't work, I'll create a ticket for a technician visit.
+
+### 2. Changing WiFi password
+To change your WiFi password, open your browser and go to the IP address written on the back of your router (usually 192.168.1.1 or 192.168.0.1), then change the password in the Wireless settings. You can also watch a video guide in our Telegram bot.
+
+### 3. Slow internet speed
+Let me check your connection. Usually speed drops when many devices are connected at once or when a VPN is enabled. If you need higher speed, I can suggest upgrading to a faster plan.
+
+### 4. Payment date / monthly charge
+In the UzbNet system, monthly charges are deducted on the 1st of each month. If your balance is insufficient, internet will be automatically blocked. You can top up via Click, Payme, or Uzum.
+
+### 5. Changing your plan
+You can change your plan through me right now, or through our app in the "Tariffs" section. The new plan will activate from the 1st of the next month.

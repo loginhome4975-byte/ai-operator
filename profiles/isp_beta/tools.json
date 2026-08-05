@@ -1,0 +1,40 @@
+[
+    {
+        "type": "function",
+        "function": {
+            "name": "get_client_info",
+            "description": "Mijozning asosiy ma'lumotlarini (ismi, tarifi, balansi, holati) bazadan tortib kelish. Bu funksiya orqali mijoz kimligini bilib olish mumkin.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone_number": {
+                        "type": "string",
+                        "description": "Mijozning telefon raqami. Agar raqam berilmagan bo'lsa, caller_id ni ishlating."
+                    }
+                },
+                "required": ["phone_number"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_ticket",
+            "description": "Mijozning muammosi haqida ustalarga yoki texnik yordam bo'limiga zayavka (ticket) ochish.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone_number": {
+                        "type": "string",
+                        "description": "Mijozning telefon raqami."
+                    },
+                    "issue_description": {
+                        "type": "string",
+                        "description": "Muammoning qisqacha tavsifi, masalan: 'Internet ishlamayapti' yoki 'Tezlik past'."
+                    }
+                },
+                "required": ["phone_number", "issue_description"]
+            }
+        }
+    }
+]

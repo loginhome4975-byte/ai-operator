@@ -1,0 +1,144 @@
+# ==============================================================
+# AI Operator — .gitignore
+# ==============================================================
+
+# ---------- Maxfiy fayllar (SECRETS — hech qachon commit qilinmasin!) ----------
+.env
+.env.local
+.env.production
+*.env-*
+kaggle.json
+~/.kaggle/kaggle.json
+/kaggle.json
+
+# ---------- Virtual muhitlar ----------
+.venv/
+venv/
+*.egg-info/
+*.egg
+.Python
+pip-wheel-metadata/
+
+# ---------- Python cache ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+
+# ---------- Build & Distribution ----------
+dist/
+build/
+*.whl
+*.tar.gz
+
+# ---------- IDE va Editor ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.sublime-project
+.sublime-workspace
+
+# ---------- OS ----------
+.DS_Store
+.DS_Store_NSRightClick
+Thumbs.db
+Desktop.ini
+
+# ---------- Log fayllar ----------
+logs/
+*.log
+nohup.out
+*.pid
+
+# ---------- Tranzient / runtime ----------
+orchestrator_api.log
+sip_server.log
+mock_llm.log
+cloudflared.log
+
+# ---------- Model fayllar (hajmi katta, HF yoki Kaggle'dan yuklanadi) ----------
+*.bin
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+*.pth
+*.onnx
+
+# ---------- Audio fayllar ----------
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# ---------- Dataset fayllar ----------
+*.jsonl
+*.parquet
+*.arrow
+
+# ---------- Database ----------
+*.db
+*.sqlite
+*.duckdb
+
+# ---------- Coverage & Test reports ----------
+.coverage
+htmlcov/
+coverage.xml
+test-results/
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+*.ipynb
+
+# ---------- Tmp fayllar ----------
+/tmp/
+tmp/
+*.tmp
+*.bak
+*.backup
+
+# ---------- Maxfiy ma'lumot va tarix ----------
+chat_history.md
+SECURITY_NOTES.md
+RECOVERY.md
+
+# ------------------------------------------------------------------
+# KATTA HAJMLI LOKAL RESURSLAR (builder ichida)
+# ------------------------------------------------------------------
+
+# Virtual environment (4.5 GB)
+builder/venv/
+
+# Model fayllar (19 GB jami)
+builder/models/
+
+# Huquqlarni o'zgartirish (llama.cpp — bu alohida repo, submodule kerak emas)
+builder/llama.cpp/
+
+# Audio kesh
+builder/data/audio_cache/
+
+# HuggingFace kesh
+builder/models/.cache/
+.cache/huggingface/
+
+# ------------------------------------------------------------------
+# KAGGLE NODE LOKAL NUSXALAR (launch script'lar yaratadi, eskirgan)
+# ------------------------------------------------------------------
+kaggle_node/run_server.py
+kaggle_node/main_app.py
+kaggle_node/kernel-metadata.json
+kaggle_node_1/run_server.py
+kaggle_node_1/kernel-metadata.json
+kaggle_node_2/run_server.py
+kaggle_node_2/kernel-metadata.json
+
+# ------------------------------------------------------------------
+# BINARY TOOLS
+# ------------------------------------------------------------------
+orchestrator/bin/cloudflared

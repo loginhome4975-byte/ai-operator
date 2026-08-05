@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+httpx
+redis
+pydantic
+prometheus_client
+cryptography
+torch
+numpy
+python-multipart

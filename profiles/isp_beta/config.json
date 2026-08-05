@@ -1,0 +1,30 @@
+{
+    "company_name": "UzbNet",
+    "bot_name": "Zarnigor",
+    "crm_type": "dummy",
+    "language": "uz",
+    "prompt_version": "v3",
+    "prompt_folder": "isp_beta",
+    "llm": {
+        "temperature": 0.3,
+        "max_tokens": 512,
+        "top_p": 0.9,
+        "repeat_penalty": 1.1
+    },
+    "context": {
+        "max_history": 20,
+        "token_limit": 3000,
+        "session_ttl_seconds": 900
+    },
+    "greeting": {
+        "uz": "Mijoz aloqaga chiqdi. O'zingizni Zarnigor deb tanishtirib, qanday yordam berishingizni so'rang. Yoqimli qizbola ovozida, do'stona va professional ohangda gapiring.",
+        "ru": "Клиент на связи. Представьтесь как Зарнигор и спросите, чем вы можете помочь. Говорите приятным женским голосом, дружелюбно и профессионально.",
+        "en": "The customer is on the line. Introduce yourself as Zarnigor and ask how you can help. Speak with a pleasant female voice, friendly and professional."
+    },
+    "voice": {
+        "language": "uz",
+        "gender": "female",
+        "style": "warm_professional",
+        "description": "Yoqimli qizbola ovozi, do'stona va professional ohang"
+    }
+}

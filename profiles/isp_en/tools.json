@@ -1,0 +1,34 @@
+[
+    {
+        "type": "function",
+        "function": {
+            "name": "get_client_info",
+            "description": "Get client info (name, tariff, balance, status) from database by phone number.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone_number": {
+                        "type": "string",
+                        "description": "Client phone number."
+                    }
+                },
+                "required": ["phone_number"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_ticket",
+            "description": "Create a support ticket for the client's technical issue.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone_number": {"type": "string", "description": "Client phone number."},
+                    "issue_description": {"type": "string", "description": "Brief description of the issue."}
+                },
+                "required": ["phone_number", "issue_description"]
+            }
+        }
+    }
+]
