@@ -808,7 +808,31 @@ def main():
             except Exception:
                 pass
 
+    kernel_id = f"{kaggle_user}/{cfg['kernel_suffix']}"
     print(f"📊 Delta: {deltadata}, Hash: {code_hash[:8]}, Dataset: {dataset_sources}")
+
+    # --- Avto-delete: eski kernel'ni o'chirish (running bo'lsa ham) ---
+    print(f"🗑️  Eski kernel tekshirilmoqda: {kernel_id}...")
+    try:
+        status_result = subprocess.run(
+            ["kaggle", "kernels", "status", kernel_id],
+            capture_output=True, text=True, timeout=15
+        )
+        if status_result.returncode == 0:
+            print(f"   Eski kernel topildi, o'chirilmoqda...")
+            del_result = subprocess.run(
+                ["kaggle", "kernels", "delete", kernel_id, "-y"],
+                capture_output=True, text=True, timeout=30
+            )
+            if del_result.returncode == 0:
+                print(f"   ✅ Eski kernel o'chirildi.")
+            else:
+                print(f"   ⚠️  O'chirishda xatolik (davom etilmoqda): {del_result.stderr[:120]}")
+        else:
+            print(f"   Eski kernel topilmadi — yangisi yuklanadi.")
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        print(f"   ⚠️  Status tekshirishda xatolik (davom etilmoqda): {e}")
+
     print("Tayyor! Kagglega API orqali yuborilmoqda...")
     subprocess.run(["kaggle", "kernels", "push", "-p", node_dir])
     print(f"{cfg['label']} Kernel yuborildi!")
