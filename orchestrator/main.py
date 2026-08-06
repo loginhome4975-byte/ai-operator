@@ -596,6 +596,25 @@ async def verify_node_key(x_api_key: Optional[str] = Header(default=None)):
 # Thread-safe lock for node registration endpoints
 _node_registration_lock = asyncio.Lock()
 
+# ----------------- VENV STATUS TRACKING -----------------
+# Har bir node uchun venv arxiv/yuklash holatini kuzatish
+_venv_status_lock = threading.Lock()
+_venv_status = {
+    "kaggle": {"status": "idle", "progress": "", "hash": "", "size_gb": 0, "chunks": "0/0", "error": ""},
+    "kaggle1": {"status": "idle", "progress": "", "hash": "", "size_gb": 0, "chunks": "0/0", "error": ""},
+    "kaggle2": {"status": "idle", "progress": "", "hash": "", "size_gb": 0, "chunks": "0/0", "error": ""},
+}
+
+def _update_venv_status(node_type: str, status: str, **kwargs):
+    """Venv status yangilash — thread-safe."""
+    with _venv_status_lock:
+        entry = _venv_status.get(node_type, {"status": "idle", "progress": "", "hash": "", "size_gb": 0, "chunks": "0/0", "error": ""})
+        entry["status"] = status
+        for k, v in kwargs.items():
+            if k in entry:
+                entry[k] = v
+        _venv_status[node_type] = entry
+
 # .env fayl update uchun lock
 _env_update_lock = threading.Lock()
 
@@ -689,6 +708,7 @@ async def upload_venv(
     
     try:
         # 1. Chunk'ni diskka yozish
+        _update_venv_status(node_type, "receiving", chunks=f"{c_idx+1}/{c_total}", size_gb=0)
         chunk_path = os.path.join(chunk_dir, f"chunk_{c_idx:04d}")
         received = 0
         with open(chunk_path, "wb") as f:
@@ -714,6 +734,7 @@ async def upload_venv(
             }
         
         # 3. Barcha chunk'lar keldi — reassemble
+        _update_venv_status(node_type, "assembling", chunks=f"{c_total}/{c_total}")
         log.info(f"[UPLOAD-VENV] Barcha {c_total} chunk keldi, reassemble qilinmoqda...")
         tmp_dir = tempfile.mkdtemp(prefix="venv_upload_")
         tar_path = os.path.join(tmp_dir, "venv.tar.gz")
@@ -798,6 +819,7 @@ async def upload_venv(
                     log.warning(f"[UPLOAD-VENV]   Tozalash xatolik: {de}")
             
             # Yuklash
+            _update_venv_status(node_type, "uploading_kaggle", hash=venv_hash[:8], size_gb=round(total_size / 1024**3, 2))
             usr = dataset_slug.split("/")[0]
             try:
                 api.dataset_status(usr, dataset_name)
@@ -810,6 +832,7 @@ async def upload_venv(
             log.info(f"[UPLOAD-VENV] Kaggle API yuklash yuborildi.")
             
             # Tekshirish (5 urinish, 20s pauza — katta dataset sekinroq index'lanadi)
+            _update_venv_status(node_type, "verifying", hash=venv_hash[:8])
             verified = False
             for attempt in range(5):
                 await asyncio.sleep(20)
@@ -831,8 +854,10 @@ async def upload_venv(
             if verified:
                 _update_env(env_path_key, dataset_slug)
                 _update_env(env_hash_key, venv_hash)
+                _update_venv_status(node_type, "verified", hash=venv_hash[:8])
                 log.info(f"[UPLOAD-VENV] ✅ {env_path_key}={dataset_slug} .env'ga yozildi")
             else:
+                _update_venv_status(node_type, "error", error="Dataset 5 urinishda tasdiqlanmadi", hash=venv_hash[:8])
                 log.warning(f"[UPLOAD-VENV] ⚠️  Dataset 5 urinishda tasdiqlanmadi — .env YOZILMADI!")
             
             return {
@@ -853,8 +878,10 @@ async def upload_venv(
                 except Exception:
                     pass
     except HTTPException:
+        _update_venv_status(node_type, "error", error="HTTP xatolik")
         raise
     except Exception as e:
+        _update_venv_status(node_type, "error", error=str(e)[:100])
         log.exception(f"[UPLOAD-VENV] Xatolik: {e}")
         raise HTTPException(status_code=500, detail=f"Dataset yuklashda xatolik: {str(e)}")
     finally:
@@ -921,6 +948,11 @@ async def nodes_status(_: str = Depends(verify_api_key)):
                 "models": [],
                 "gpus": [],
             }
+    
+    # Har bir node uchun venv status qo'shish
+    with _venv_status_lock:
+        for ntype in result:
+            result[ntype]["venv"] = dict(_venv_status.get(ntype, {"status": "idle"}))
     
     return {"nodes": result}
 

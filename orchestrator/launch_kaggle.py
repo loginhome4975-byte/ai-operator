@@ -900,6 +900,7 @@ def _display_nodes_from_orchestrator(nodes_data):
         gpus = info.get("gpus", [])
         url = info.get("url", "")
         error = info.get("error", "")
+        venv = info.get("venv", {})
         
         # Status emoji
         if status == "healthy":
@@ -930,8 +931,34 @@ def _display_nodes_from_orchestrator(nodes_data):
             print(f"     ❌ Yuklanmagan: {', '.join(missing)}")
         if error:
             print(f"     ⚠️  {error[:120]}")
+        
+        # Venv status
+        if venv:
+            _print_venv_status(venv)
     
     print()
+
+
+def _print_venv_status(venv):
+    """Venv holatini ko'rsatish."""
+    vstatus = venv.get("status", "idle")
+    vhash = venv.get("hash", "")
+    vsize = venv.get("size_gb", 0)
+    vchunks = venv.get("chunks", "")
+    verror = venv.get("error", "")
+    
+    status_map = {
+        "idle": ("⚪", "Venv: tayyor (o'zgarish yo'q)"),
+        "receiving": ("📥", f"Venv: chunk'lab yuborilmoqda ({vchunks})"),
+        "assembling": ("🔧", "Venv: yig'ilmoqda..."),
+        "uploading_kaggle": ("📤", f"Venv: Kaggle'ga yuklanmoqda ({vsize:.1f} GB, hash={vhash})"),
+        "verifying": ("🔍", f"Venv: tekshirilmoqda (5 ta urinish)..."),
+        "verified": ("✅", f"Venv: yuklandi! (hash={vhash})"),
+        "error": ("❌", f"Venv: xato — {verror[:80]}"),
+    }
+    
+    icon, msg = status_map.get(vstatus, ("❓", f"Venv: {vstatus}"))
+    print(f"     {icon} {msg}")
 
 
 def _monitor_via_kaggle_cli():
