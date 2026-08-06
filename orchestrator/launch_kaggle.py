@@ -8,6 +8,8 @@ Ishlatish:
     python3 launch_kaggle.py            # Node-0: LLM + TTS (UZ)
     python3 launch_kaggle.py --node 1   # Node-1: STT (RU) + TTS (RU/EN)
     python3 launch_kaggle.py --node 2   # Node-2: STT (EN) + STT (UZ)
+    python3 launch_kaggle.py --all      # Barcha 3 node
+    python3 launch_kaggle.py -d         # Barcha akkauntdagi kernel'larni o'chirish
     python3 launch_kaggle.py --node 0 --dry-run   # faqat fayllarni generatsiya qiladi
 
 Har bir node alohida Kaggle akkauntiga tegishli (.env dan o'qiladi):
@@ -710,6 +712,88 @@ os.system(f"/kaggle/working/venv/bin/python /kaggle/working/main_app.py")
 
 
 # =====================================================================
+# KERNEL TOZALASH (--d)
+# =====================================================================
+def _delete_all_kernels():
+    """Barcha 3 Kaggle akkauntidagi barcha kernel'larni o'chiradi."""
+    total_deleted = 0
+
+    for node in [0, 1, 2]:
+        cfg = NODE_CONFIGS[node]
+        user, token = _resolve_account(node)
+
+        # Kaggle akkauntini env orqali sozlash
+        kaggle_dir = os.path.expanduser("~/.kaggle")
+        json_path = os.path.join(kaggle_dir, "kaggle.json")
+        if os.path.exists(json_path):
+            try:
+                os.remove(json_path)
+            except Exception:
+                pass
+
+        print(f"\n{'='*60}")
+        print(f"  {cfg['label']}: {user}")
+        print(f"{'='*60}")
+
+        # Kernel ro'yxatini olish
+        try:
+            result = subprocess.run(
+                ["kaggle", "kernels", "list", "--mine", "--csv"],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                print(f"   ⚠️  Kernel ro'yxati olinmadi: {result.stderr[:100]}")
+                continue
+        except (subprocess.SubprocessError, FileNotFoundError) as e:
+            print(f"   ⚠️  Xatolik: {e}")
+            continue
+
+        # CSV parser — birinchi qator header
+        lines = result.stdout.strip().split("\n")
+        if len(lines) < 2:
+            print("   ✅ Kernel topilmadi.")
+            continue
+
+        # Header: ref,title,author,lastRunTime,totalVotes,...
+        header = lines[0].split(",")
+        try:
+            ref_idx = header.index("ref")
+        except ValueError:
+            print("   ⚠️  CSV format noto'g'ri.")
+            continue
+
+        kernels = []
+        for line in lines[1:]:
+            cols = line.split(",")
+            if len(cols) > ref_idx:
+                ref = cols[ref_idx].strip()
+                if ref:
+                    kernels.append(ref)
+
+        if not kernels:
+            print("   ✅ Kernel topilmadi.")
+            continue
+
+        print(f"   {len(kernels)} ta kernel topildi, o'chirilmoqda...")
+
+        for kref in kernels:
+            try:
+                del_result = subprocess.run(
+                    ["kaggle", "kernels", "delete", kref, "-y"],
+                    capture_output=True, text=True, timeout=30
+                )
+                if del_result.returncode == 0:
+                    print(f"   ✅ {kref}")
+                    total_deleted += 1
+                else:
+                    print(f"   ⚠️  {kref}: {del_result.stderr[:80]}")
+            except (subprocess.SubprocessError, FileNotFoundError) as e:
+                print(f"   ⚠️  {kref}: {e}")
+
+    print(f"\n🎯 Jami: {total_deleted} ta kernel o'chirildi.")
+
+
+# =====================================================================
 # MAIN
 # =====================================================================
 def _launch_node(node: int, dry_run: bool = False):
@@ -831,17 +915,26 @@ def main():
             "  python3 launch_kaggle.py --node 1   # Node-1: STT (RU) + TTS (RU/EN)\n"
             "  python3 launch_kaggle.py --node 2   # Node-2: STT (EN) + STT (UZ)\n"
             "  python3 launch_kaggle.py --all       # Barcha 3 node'ni ketma-ket push qiladi\n"
+            "  python3 launch_kaggle.py -d          # Barcha akkauntdagi kernel'larni o'chirish\n"
         ),
     )
     parser.add_argument("--node", type=int, choices=[0, 1, 2], default=0,
                         help="Qaysi node'ni ishga tushirish (default: 0)")
     parser.add_argument("--all", action="store_true",
                         help="Barcha 3 node'ni ketma-ket push qilish (0 → 1 → 2)")
+    parser.add_argument("-d", "--delete-all", action="store_true",
+                        help="Barcha 3 akkauntdagi barcha kernel'larni o'chirish")
     parser.add_argument("--dry-run", action="store_true",
                         help="Faqat fayllarni generatsiya qiladi, Kaggle'ga push qilmaydi")
     args = parser.parse_args()
 
     _load_env()
+
+    # --d flag: faqat o'chirish, launch qilmaslik
+    if args.delete_all:
+        print("🗑️  BARCHA AKKAUNTDAGI KERNELLAR O'CHIRILMOQDA...")
+        _delete_all_kernels()
+        return
 
     aes_256_key = os.environ.get("AES_256_KEY", "")
     if not aes_256_key:
