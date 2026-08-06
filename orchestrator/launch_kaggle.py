@@ -848,6 +848,177 @@ def _show_quota():
 
 
 # =====================================================================
+# NODE MONITORING (-m)
+# =====================================================================
+def _monitor_nodes():
+    """Barcha node'lar holatini ko'rsatadi: GPU, model, status.
+    Orchestrator /api/nodes/status orqali yoki Kaggle CLI orqali."""
+    import urllib.request
+    import urllib.error
+    
+    orch_url = os.environ.get("ORCHESTRATOR_URL", "https://orchestrator.traffix.uz")
+    api_key = os.environ.get("ORCHESTRATOR_API_KEY", "")
+    
+    print(f"\n{'='*70}")
+    print(f"  📡 NODE MONITORING")
+    print(f"{'='*70}")
+    
+    # 1. Orchestrator orqali urinib ko'rish
+    if api_key:
+        try:
+            req = urllib.request.Request(
+                f"{orch_url}/api/nodes/status",
+                headers={"X-API-Key": api_key}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                nodes_data = data.get("nodes", {})
+                
+                if nodes_data:
+                    _display_nodes_from_orchestrator(nodes_data)
+                    return
+        except Exception as e:
+            print(f"  ⚠️  Orchestrator ulanmadi: {e}")
+            print(f"  Kaggle CLI orqali tekshirilmoqda...\n")
+    
+    # 2. Fallback: Kaggle CLI
+    _monitor_via_kaggle_cli()
+
+
+def _display_nodes_from_orchestrator(nodes_data):
+    """Orchestrator'dan olingan node ma'lumotlarini chiroyli ko'rsatish."""
+    for ntype in ["kaggle", "kaggle1", "kaggle2"]:
+        info = nodes_data.get(ntype, {})
+        if not info:
+            continue
+        
+        node = info.get("node", "?")
+        label = info.get("label", f"Node-{node}")
+        status = info.get("status", "?")
+        models = info.get("models", [])
+        missing = info.get("missing", [])
+        gpus = info.get("gpus", [])
+        url = info.get("url", "")
+        error = info.get("error", "")
+        
+        # Status emoji
+        if status == "healthy":
+            st_icon = "🟢"
+        elif status == "degraded":
+            st_icon = "🟡"
+        elif status == "starting":
+            st_icon = "🔵"
+        else:
+            st_icon = "🔴"
+        
+        print(f"\n  {st_icon} Node-{node}: {label}")
+        print(f"     Status: {status}")
+        
+        if gpus:
+            for gpu in gpus:
+                gid = gpu.get("id", "?")
+                gname = gpu.get("name", "?")
+                mem_total = gpu.get("mem_total_gb", 0)
+                mem_used = gpu.get("mem_used_gb", 0)
+                print(f"     GPU #{gid}: {gname} | {mem_used:.1f}/{mem_total:.1f} GB")
+        else:
+            print(f"     GPU: ma'lumot yo'q")
+        
+        if models:
+            print(f"     Modellar: {', '.join(models)}")
+        if missing:
+            print(f"     ❌ Yuklanmagan: {', '.join(missing)}")
+        if error:
+            print(f"     ⚠️  {error[:120]}")
+    
+    print()
+
+
+def _monitor_via_kaggle_cli():
+    """Kaggle CLI orqali node holatini tekshirish."""
+    for node in [0, 1, 2]:
+        cfg = NODE_CONFIGS[node]
+        user, token = _resolve_account(node)
+        
+        # kaggle.json tozalash
+        kaggle_dir = os.path.expanduser("~/.kaggle")
+        json_path = os.path.join(kaggle_dir, "kaggle.json")
+        if os.path.exists(json_path):
+            try:
+                os.remove(json_path)
+            except Exception:
+                pass
+        
+        kernel_id = f"{user}/{cfg['kernel_suffix']}"
+        print(f"\n  Node-{node}: {kernel_id}")
+        
+        try:
+            result = subprocess.run(
+                ["kaggle", "kernels", "status", kernel_id],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0 and "RUNNING" in result.stdout:
+                print(f"     Status: 🟢 RUNNING")
+                # Log'lardan GPU/model ajratib olishga harakat qilamiz
+                _parse_logs_for_info(kernel_id, cfg["logger"])
+            elif result.returncode == 0:
+                print(f"     Status: ⚪ {result.stdout.strip().split('has status')[1].strip() if 'has status' in result.stdout else 'completed'}")
+            else:
+                print(f"     Status: ⚫ kernel topilmadi")
+        except (subprocess.SubprocessError, FileNotFoundError) as e:
+            print(f"     ⚠️  Xatolik: {e}")
+    print()
+
+
+def _parse_logs_for_info(kernel_id: str, logger_name: str):
+    """Kernel log'lardan GPU soni va model nomlarini ajratib olish."""
+    try:
+        result = subprocess.run(
+            ["kaggle", "kernels", "logs", kernel_id],
+            capture_output=True, text=True, timeout=15
+        )
+        lines = result.stdout.split("\n")
+        
+        gpu_count = None
+        models = []
+        
+        for line in lines:
+            # GPU soni: X
+            if "GPU soni:" in line:
+                try:
+                    gpu_count = int(line.split("GPU soni:")[1].strip())
+                except ValueError:
+                    pass
+            
+            # Model nomlari: "Modellar tayyor!" yoki "Modellar: xxx"
+            if "Modellar:" in line and "tayyor" not in line:
+                models_str = line.split("Modellar:")[1].strip()
+                models = [m.strip() for m in models_str.split(",")]
+            elif "Modellar tayyor" in line:
+                # Node-0 da "Modellar tayyor!" — oldingi qatorlardan model nomini topish
+                pass
+            
+            # Node-0 specific: "[1/2] Sayro TTS" yoki "[2/2] Miyya LLM"
+            if "[1/2]" in line or "[2/2]" in line:
+                # Model yuklanayotgan qator — nomini ajratib olish
+                parts = line.split("]")
+                if len(parts) > 1:
+                    model_desc = parts[1].split("(")[0].strip() if "(" in parts[1] else parts[1].strip()
+                    if model_desc and len(model_desc) > 3:
+                        models.append(model_desc)
+        
+        if gpu_count is not None:
+            print(f"     GPU soni: {gpu_count}")
+        if models:
+            # Deduplicate
+            unique_models = list(dict.fromkeys(models))
+            print(f"     Modellar: {', '.join(unique_models[:5])}")
+            
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+
+# =====================================================================
 # KERNEL TOZALASH (--d)
 # =====================================================================
 def _delete_all_kernels():
@@ -1053,6 +1224,7 @@ def main():
             "  python3 launch_kaggle.py --all       # Barcha 3 node'ni ketma-ket push qiladi\n"
             "  python3 launch_kaggle.py -d          # Barcha akkauntdagi kernel'larni o'chirish\n"
             "  python3 launch_kaggle.py -i          # GPU/TPU kvota ma'lumoti\n"
+            "  python3 launch_kaggle.py -m          # Node monitoring (GPU, model, status)\n"
         ),
     )
     parser.add_argument("--node", type=int, choices=[0, 1, 2], default=0,
@@ -1063,6 +1235,8 @@ def main():
                         help="Barcha 3 akkauntdagi barcha kernel'larni o'chirish")
     parser.add_argument("-i", "--info", action="store_true",
                         help="GPU/TPU kvota ma'lumotlarini ko'rsatish (ishlatilgan/qolgan/jami)")
+    parser.add_argument("-m", "--monitor", action="store_true",
+                        help="Barcha node'lar holatini ko'rsatish: GPU, model, status (auto-detect)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Faqat fayllarni generatsiya qiladi, Kaggle'ga push qilmaydi")
     args = parser.parse_args()
@@ -1078,6 +1252,11 @@ def main():
     if args.delete_all:
         print("🗑️  BARCHA AKKAUNTDAGI KERNELLAR O'CHIRILMOQDA...")
         _delete_all_kernels()
+        return
+
+    # -m flag: node monitoring
+    if args.monitor:
+        _monitor_nodes()
         return
 
     aes_256_key = os.environ.get("AES_256_KEY", "")

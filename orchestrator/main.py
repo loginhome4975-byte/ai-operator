@@ -871,6 +871,60 @@ async def upload_venv(
                 pass
 
 
+@app.get("/api/nodes/status")
+async def nodes_status(_: str = Depends(verify_api_key)):
+    """Barcha node'larning holatini qaytaradi — GPU, model, URL.
+    -m flag uchun ishlatiladi."""
+    import asyncio as _aio
+    
+    node_info = {
+        "kaggle": {"node": 0, "url": KAGGLE_URL, "label": "Node-0 (LLM+TTS UZ)"},
+        "kaggle1": {"node": 1, "url": KAGGLE1_URL, "label": "Node-1 (STT RU+TTS)"},
+        "kaggle2": {"node": 2, "url": KAGGLE2_URL, "label": "Node-2 (STT EN+UZ)"},
+    }
+    
+    result = {}
+    for ntype, info in node_info.items():
+        url = info["url"]
+        health_url = f"{url}/health"
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+                resp = await client.get(health_url, headers=NODE_HEADERS)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    result[ntype] = {
+                        "node": info["node"],
+                        "label": info["label"],
+                        "url": url,
+                        "status": data.get("status", "?"),
+                        "models": data.get("models", []),
+                        "missing": data.get("missing", []),
+                        "gpus": data.get("gpus", []),
+                        "error": data.get("error", ""),
+                    }
+                else:
+                    result[ntype] = {
+                        "node": info["node"],
+                        "label": info["label"],
+                        "url": url,
+                        "status": f"HTTP {resp.status_code}",
+                        "models": [],
+                        "gpus": [],
+                    }
+        except Exception as e:
+            result[ntype] = {
+                "node": info["node"],
+                "label": info["label"],
+                "url": url,
+                "status": "unreachable",
+                "error": str(e)[:120],
+                "models": [],
+                "gpus": [],
+            }
+    
+    return {"nodes": result}
+
+
 @app.post("/register-node")
 async def register_node(req: NodeRegistration, _: str = Depends(verify_node_key)):
     """Kaggle nodlarini registratsiya qilish — NODE_COMM_KEY yoki API_KEY.
