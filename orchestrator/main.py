@@ -21,7 +21,7 @@ import httpx
 import redis
 import pydantic
 from fastapi import (
-    FastAPI, HTTPException, UploadFile, File, Form,
+    FastAPI, HTTPException, Form,
     Depends, Security, WebSocket, WebSocketDisconnect, Header, Query, Request,
 )
 from fastapi.responses import PlainTextResponse, FileResponse
@@ -71,15 +71,6 @@ class _ColoredFormatter(logging.Formatter):
             color = _MAG
         elif "KAGGLE" in msg or "kaggle" in msg.lower() or "Node-0" in msg or "LLM" in msg:
             color = _GRN
-
-        # UPLOAD / ENV — bright yellow
-        if "[UPLOAD-VENV]" in msg:
-            color = _BYEL if "✅" in msg else _YEL
-        if "[ENV]" in msg:
-            color = _BYEL
-        if "[DISCOVERY]" in msg:
-            # DISCOVERY log'lari node rangida (color allaqachon set)
-            pass
 
         # Level bo'yicha rang
         if record.levelno >= logging.ERROR:
@@ -308,11 +299,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def limit_upload_size(request, call_next):
-    """M4 / DoS: haddan tashqari katta audio fayllarni rad etish.
-    /upload-venv endpoint exempt — venv arxivlari 2-5 GB bo'lishi mumkin."""
-    # /upload-venv uchun limit qo'llanilmaydi (katta venv arxivlari)
-    if request.url.path == "/upload-venv":
-        return await call_next(request)
+    """M4 / DoS: haddan tashqari katta audio fayllarni rad etish."""
     cl = request.headers.get("content-length")
     if cl:
         try:
@@ -596,306 +583,7 @@ async def verify_node_key(x_api_key: Optional[str] = Header(default=None)):
 # Thread-safe lock for node registration endpoints
 _node_registration_lock = asyncio.Lock()
 
-# ----------------- VENV STATUS TRACKING -----------------
-# Har bir node uchun venv arxiv/yuklash holatini kuzatish
-_venv_status_lock = threading.Lock()
-_venv_status = {
-    "kaggle": {"status": "idle", "progress": "", "hash": "", "size_gb": 0, "chunks": "0/0", "error": ""},
-    "kaggle1": {"status": "idle", "progress": "", "hash": "", "size_gb": 0, "chunks": "0/0", "error": ""},
-    "kaggle2": {"status": "idle", "progress": "", "hash": "", "size_gb": 0, "chunks": "0/0", "error": ""},
-}
 
-def _update_venv_status(node_type: str, status: str, **kwargs):
-    """Venv status yangilash — thread-safe."""
-    with _venv_status_lock:
-        entry = _venv_status.get(node_type, {"status": "idle", "progress": "", "hash": "", "size_gb": 0, "chunks": "0/0", "error": ""})
-        entry["status"] = status
-        for k, v in kwargs.items():
-            if k in entry:
-                entry[k] = v
-        _venv_status[node_type] = entry
-
-# .env fayl update uchun lock
-_env_update_lock = threading.Lock()
-
-
-def _get_node_index_from_type(node_type: str) -> str:
-    """node_type dan node index'ni aniqlash (regex o'rniga to'g'ridan-to'g'ri mapping).
-    'kaggle' -> '0', 'kaggle1' -> '1', 'kaggle2' -> '2'
-    """
-    mapping = {"kaggle": "0", "kaggle1": "1", "kaggle2": "2"}
-    return mapping.get(node_type, "0")
-
-
-
-def _update_env(key: str, value: str):
-    """.env faylida key=value ni yangilash yoki qo'shish. Thread-safe."""
-    _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    with _env_update_lock:
-        try:
-            with open(_env_path, "r") as f:
-                lines = f.readlines()
-        except FileNotFoundError:
-            lines = []
-
-        prefix = f"{key}="
-        found = False
-        new_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith(prefix) or stripped.startswith(f"# {key}="):
-                new_lines.append(f'{key}="{value}"\n')
-                found = True
-            else:
-                new_lines.append(line)
-        if not found:
-            new_lines.append(f'{key}="{value}"\n')
-
-        tmp = _env_path + ".tmp"
-        with open(tmp, "w") as f:
-            f.writelines(new_lines)
-        os.replace(tmp, _env_path)
-        log.info(f"[ENV] {key}={value} saqlandi")
-
-
-@app.post("/upload-venv")
-async def upload_venv(
-    file: UploadFile = File(...),
-    dataset_slug: str = Form(...),
-    dataset_name: str = Form(...),
-    venv_hash: str = Form(...),
-    kaggle_user: str = Form(...),
-    kaggle_key: str = Form(...),
-    deltadata: str = Form(default="false"),
-    chunk_index: str = Form(default="0"),
-    total_chunks: str = Form(default="1"),
-    upload_id: str = Form(default=""),
-    file_sha256: str = Form(default=""),
-    node_type: str = Form(default="kaggle"),
-    _: str = Depends(verify_node_key),
-):
-    """Kaggle node'lardan venv arxivini CHUNK'lab qabul qilish.
-    
-    Cloudflare tunnel 100MB limit — shuning uchun fayl 45MB chunk'larga bo'linadi.
-    Barcha chunk'lar yig'ilgach reassemble qilinadi va Kaggle'ga yuklanadi.
-    
-    deltadata=true bo'lsa: avvalgi dataset versiyasi o'chiriladi.
-    Yuklash muvaffaqiyatli bo'lsa .env ga NODE{X}_DATASET_PATH va NODE{X}_VENV_HASH yoziladi.
-    """
-    import tempfile, shutil
-    
-    c_idx = int(chunk_index)
-    c_total = int(total_chunks)
-    uid = upload_id or dataset_slug
-    is_delta = deltadata.lower() == "true"
-    
-    # Chunk'lar uchun temp papka — avval shu dataset uchun eski orfon
-    # chunk_dir'larni tozalaymiz (oldingi upload uzilib qolgan bo'lsa).
-    _chunk_base = f"/tmp/venv_chunks_{uid.replace('/', '_')}"
-    chunk_dir = _chunk_base
-    # Eski chunk'larni tozalash: yangi upload_id kelsa, oldingi qoldiqlarni o'chiramiz
-    if c_idx == 0:
-        _ds_key = dataset_slug.replace('/', '_')
-        import glob as _glob
-        for _old_dir in _glob.glob(f"/tmp/venv_chunks_{_ds_key}_*"):
-            if _old_dir != chunk_dir and os.path.isdir(_old_dir):
-                try:
-                    shutil.rmtree(_old_dir, ignore_errors=True)
-                    log.info(f"[UPLOAD-VENV] 🧹 Eski chunk dir tozalandi: {os.path.basename(_old_dir)}")
-                except Exception:
-                    pass
-    os.makedirs(chunk_dir, exist_ok=True)
-    
-    try:
-        # 1. Chunk'ni diskka yozish
-        _update_venv_status(node_type, "receiving", chunks=f"{c_idx+1}/{c_total}", size_gb=0)
-        chunk_path = os.path.join(chunk_dir, f"chunk_{c_idx:04d}")
-        received = 0
-        with open(chunk_path, "wb") as f:
-            while True:
-                data = await file.read(8 * 1024 * 1024)
-                if not data:
-                    break
-                f.write(data)
-                received += len(data)
-        log.info(f"[UPLOAD-VENV] Chunk {c_idx+1}/{c_total}: {dataset_slug} ({received/1024**2:.1f} MB)")
-        
-        # 2. Barcha chunk'lar yetib kelganini tekshirish
-        existing = sorted([
-            f for f in os.listdir(chunk_dir) if f.startswith("chunk_")
-        ])
-        if len(existing) < c_total:
-            return {
-                "status": "chunk_received",
-                "chunk": c_idx,
-                "received": len(existing),
-                "total": c_total,
-                "upload_id": uid,
-            }
-        
-        # 3. Barcha chunk'lar keldi — reassemble
-        _update_venv_status(node_type, "assembling", chunks=f"{c_total}/{c_total}")
-        log.info(f"[UPLOAD-VENV] Barcha {c_total} chunk keldi, reassemble qilinmoqda...")
-        tmp_dir = tempfile.mkdtemp(prefix="venv_upload_")
-        tar_path = os.path.join(tmp_dir, "venv.tar.gz")
-        
-        total_size = 0
-        with open(tar_path, "wb") as outf:
-            for cf in existing:
-                cp = os.path.join(chunk_dir, cf)
-                with open(cp, "rb") as inf:
-                    outf.write(inf.read())
-                total_size += os.path.getsize(cp)
-        
-        log.info(f"[UPLOAD-VENV] Reassemble qilindi: {total_size / 1024**3:.2f} GB")
-        
-        # 4. SHA256 tekshiruvi (agar berilgan bo'lsa)
-        if file_sha256:
-            actual = hashlib.sha256()
-            with open(tar_path, "rb") as f:
-                while True:
-                    data = f.read(8 * 1024 * 1024)
-                    if not data:
-                        break
-                    actual.update(data)
-            actual_hash = actual.hexdigest()
-            if actual_hash != file_sha256:
-                log.error(f"[UPLOAD-VENV] ❌ SHA256 mos emas! expected={file_sha256[:16]}... actual={actual_hash[:16]}...")
-                raise HTTPException(status_code=400, detail="SHA256 checksum mismatch")
-            log.info(f"[UPLOAD-VENV] ✅ SHA256 tasdiqlandi: {actual_hash[:16]}...")
-        
-        # 5. Kaggle auth
-        kg_dir = os.path.expanduser("~/.kaggle")
-        os.makedirs(kg_dir, exist_ok=True)
-        kg_json_path = os.path.join(kg_dir, "kaggle.json")
-        
-        old_kg = None
-        if os.path.exists(kg_json_path):
-            with open(kg_json_path, "r") as f:
-                old_kg = f.read()
-        
-        with open(kg_json_path, "w") as f:
-            json.dump({"username": kaggle_user, "key": kaggle_key}, f)
-        os.chmod(kg_json_path, 0o600)
-        
-        try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-            api = KaggleApi()
-            api.authenticate()
-            
-            # Dataset papkasini tayyorlash
-            ds_dir = os.path.join(tmp_dir, "dataset")
-            os.makedirs(ds_dir, exist_ok=True)
-            dst_tar = os.path.join(ds_dir, "venv.tar.gz")
-            shutil.copy(tar_path, dst_tar)
-            
-            with open(os.path.join(ds_dir, "venv_hash.txt"), "w") as f:
-                f.write(venv_hash)
-            
-            meta = {
-                "id": dataset_slug, "title": dataset_name,
-                "licenses": [{"name": "CC0-1.0"}]
-            }
-            with open(os.path.join(ds_dir, "dataset-metadata.json"), "w") as f:
-                json.dump(meta, f)
-            
-            # DELTADATA
-            if is_delta:
-                log.info(f"[UPLOAD-VENV] 🔄 DELTADATA: eski dataset tozalanmoqda...")
-                try:
-                    usr_check = dataset_slug.split("/")[0]
-                    try:
-                        versions = api.dataset_list_versions(usr_check, dataset_name)
-                        if hasattr(versions, 'items') and versions.items:
-                            for v in versions.items[1:]:
-                                try:
-                                    api.dataset_delete_version(usr_check, dataset_name, str(v.versionNumber))
-                                    log.info(f"[UPLOAD-VENV]   Eski versiya o'chirildi: v{v.versionNumber}")
-                                except Exception as ve:
-                                    log.warning(f"[UPLOAD-VENV]   Versiya o'chirishda xatolik: {ve}")
-                    except Exception as le:
-                        log.warning(f"[UPLOAD-VENV]   Versiya ro'yxati xatolik: {le}")
-                except Exception as de:
-                    log.warning(f"[UPLOAD-VENV]   Tozalash xatolik: {de}")
-            
-            # Yuklash
-            _update_venv_status(node_type, "uploading_kaggle", hash=venv_hash[:8], size_gb=round(total_size / 1024**3, 2))
-            usr = dataset_slug.split("/")[0]
-            try:
-                api.dataset_status(usr, dataset_name)
-                log.info(f"[UPLOAD-VENV] Dataset mavjud, yangi versiya yuklanmoqda...")
-                api.dataset_create_version(ds_dir, version_notes=f"venv hash={venv_hash[:8]}", dir_mode="skip")
-            except Exception:
-                log.info(f"[UPLOAD-VENV] Yangi dataset yaratilmoqda...")
-                api.dataset_create_new(ds_dir, dir_mode="skip")
-            
-            log.info(f"[UPLOAD-VENV] Kaggle API yuklash yuborildi.")
-            
-            # Tekshirish (5 urinish, 20s pauza — katta dataset sekinroq index'lanadi)
-            _update_venv_status(node_type, "verifying", hash=venv_hash[:8])
-            verified = False
-            for attempt in range(5):
-                await asyncio.sleep(20)
-                try:
-                    fl = api.dataset_list_files(usr, dataset_name)
-                    fnames = [str(f) for f in (fl.files if hasattr(fl, 'files') else [])]
-                    if "venv_hash.txt" in fnames:
-                        log.info(f"[UPLOAD-VENV] ✅ Dataset tasdiqlandi! (urinish {attempt+1}/5)")
-                        verified = True
-                        break
-                except Exception as e:
-                    log.warning(f"[UPLOAD-VENV] Tekshiruv {attempt+1}/5: {e}")
-            
-            # .env ga FAQAT verification o'tganda yozamiz (#1 bug fix)
-            node_idx = _get_node_index_from_type(node_type)
-            env_path_key = f"NODE{node_idx}_DATASET_PATH"
-            env_hash_key = f"NODE{node_idx}_VENV_HASH"
-            
-            if verified:
-                _update_env(env_path_key, dataset_slug)
-                _update_env(env_hash_key, venv_hash)
-                _update_venv_status(node_type, "verified", hash=venv_hash[:8])
-                log.info(f"[UPLOAD-VENV] ✅ {env_path_key}={dataset_slug} .env'ga yozildi")
-            else:
-                _update_venv_status(node_type, "error", error="Dataset 5 urinishda tasdiqlanmadi", hash=venv_hash[:8])
-                log.warning(f"[UPLOAD-VENV] ⚠️  Dataset 5 urinishda tasdiqlanmadi — .env YOZILMADI!")
-            
-            return {
-                "status": "success" if verified else "uploaded_unverified",
-                "dataset": dataset_slug, "hash": venv_hash[:8],
-                "size_gb": round(total_size / 1024**3, 2),
-                "verified": verified, "chunks": c_total,
-                "env_saved": {env_path_key: dataset_slug, env_hash_key: venv_hash} if verified else {},
-            }
-        finally:
-            if old_kg is not None:
-                with open(kg_json_path, "w") as f:
-                    f.write(old_kg)
-                os.chmod(kg_json_path, 0o600)
-            else:
-                try:
-                    os.remove(kg_json_path)
-                except Exception:
-                    pass
-    except HTTPException:
-        _update_venv_status(node_type, "error", error="HTTP xatolik")
-        raise
-    except Exception as e:
-        _update_venv_status(node_type, "error", error=str(e)[:100])
-        log.exception(f"[UPLOAD-VENV] Xatolik: {e}")
-        raise HTTPException(status_code=500, detail=f"Dataset yuklashda xatolik: {str(e)}")
-    finally:
-        # Faqat reassemble bo'lganda chunk'larni tozalash
-        if 'tar_path' in dir() and os.path.exists(tar_path):
-            try:
-                shutil.rmtree(chunk_dir, ignore_errors=True)
-            except Exception:
-                pass
-        if 'tmp_dir' in dir():
-            try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
 
 
 @app.get("/api/nodes/status")
@@ -948,11 +636,6 @@ async def nodes_status(_: str = Depends(verify_api_key)):
                 "models": [],
                 "gpus": [],
             }
-    
-    # Har bir node uchun venv status qo'shish
-    with _venv_status_lock:
-        for ntype in result:
-            result[ntype]["venv"] = dict(_venv_status.get(ntype, {"status": "idle"}))
     
     return {"nodes": result}
 

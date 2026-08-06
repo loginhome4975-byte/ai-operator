@@ -23,7 +23,6 @@ almashinuvi). Node-0 ham env kredensiallari berilgan bo'lsa xuddi shunday qiladi
 """
 import argparse
 import base64
-import hashlib
 import json
 import os
 import subprocess
@@ -38,9 +37,7 @@ NODE_CONFIGS = {
         "node_type": "kaggle",
         "node_port": 5001,
         "node_dir": "kaggle_node",
-        "dataset_suffix": "ai-operator-node0-venv",
         "kernel_suffix": "ai-operator-kaggle-node",
-        "env_prefix": "NODE0",
         "username_env": "KAGGLE_USERNAME",
         "key_env": "KAGGLE_KEY",
         "default_user": "bunyodbek7",
@@ -65,9 +62,7 @@ NODE_CONFIGS = {
         "node_type": "kaggle1",
         "node_port": 5003,
         "node_dir": "kaggle_node_1",
-        "dataset_suffix": "ai-operator-node1-venv",
         "kernel_suffix": "ai-operator-kaggle-node-1",
-        "env_prefix": "NODE1",
         "username_env": "KAGGLE_USERNAME_1",
         "key_env": "KAGGLE_KEY_1",
         "default_user": None,
@@ -92,9 +87,7 @@ NODE_CONFIGS = {
         "node_type": "kaggle2",
         "node_port": 5002,
         "node_dir": "kaggle_node_2",
-        "dataset_suffix": "ai-operator-node2-venv",
         "kernel_suffix": "ai-operator-kaggle-node-2",
-        "env_prefix": "NODE2",
         "username_env": "KAGGLE_USERNAME_2",
         "key_env": "KAGGLE_KEY_2",
         "default_user": None,
@@ -171,7 +164,7 @@ def _resolve_account(node):
 # SERVER KODI (main_app.py)
 # =====================================================================
 def _build_server_head(cfg):
-    """Umumiy server kodi: importlar, logging, xavfsizlik, tunnel, upload, register."""
+    """Umumiy server kodi: importlar, logging, xavfsizlik, tunnel, register."""
     aes_256_key = os.environ.get("AES_256_KEY", "")
     hf_token = os.environ.get("HF_TOKEN", "")
     orch_url = os.environ.get("ORCHESTRATOR_URL", "https://orchestrator.traffix.uz")
@@ -256,66 +249,6 @@ if not public_url:
     sys.exit(1)
 log.info(f"Tunnel URL: {{public_url}}")
 
-UPLOAD_FLAG = "/kaggle/working/.venv_upload_info"
-
-def _upload_venv_if_needed():
-    if not os.path.exists(UPLOAD_FLAG):
-        return
-    try:
-        with open(UPLOAD_FLAG) as f:
-            info = json.load(f)
-        tar_path = info.get("tar_path", "")
-        if not os.path.exists(tar_path):
-            log.warning(f"Venv arxiv topilmadi: {{tar_path}}")
-            os.remove(UPLOAD_FLAG)
-            return
-        size_gb = os.path.getsize(tar_path) / 1024**3
-        log.info(f"📦 Venv arxiv yuborilmoqda ({{size_gb:.1f}} GB, 45MB chunk'lab)...")
-
-        import hashlib as _hl
-        _sha = _hl.sha256()
-        with open(tar_path, "rb") as tf:
-            while True:
-                buf = tf.read(8*1024*1024)
-                if not buf: break
-                _sha.update(buf)
-        _file_hash = _sha.hexdigest()
-
-        _uid = _hl.sha256(f"{{info['dataset_slug']}}-{{time.time()}}".encode()).hexdigest()[:12]
-        CHUNK = 45 * 1024 * 1024
-        total_size = os.path.getsize(tar_path)
-        total_chunks = (total_size + CHUNK - 1) // CHUNK
-        nk = "{node_comm_key}"
-        base_data = {{k: str(info[k]) for k in ["dataset_slug", "dataset_name", "venv_hash", "kaggle_user", "kaggle_key", "deltadata", "node_type"] if k in info}}
-        log.info(f"  Jami {{total_chunks}} chunk, upload_id={{_uid}}")
-
-        ok = True
-        with open(tar_path, "rb") as tf:
-            for ci in range(total_chunks):
-                chunk_data = tf.read(CHUNK)
-                fd = {{**base_data, "chunk_index": str(ci), "total_chunks": str(total_chunks),
-                      "upload_id": _uid, "file_sha256": _file_hash}}
-                files = {{"file": (f"chunk_{{ci:04d}}", chunk_data, "application/octet-stream")}}
-                r = requests.post(f"{{ORCHESTRATOR_URL}}/upload-venv", files=files, data=fd,
-                                headers={{"X-API-Key": nk}}, timeout=300)
-                if r.status_code != 200:
-                    log.warning(f"  Chunk {{ci+1}}/{{total_chunks}} xatosi: {{r.status_code}}")
-                    ok = False
-                    break
-                resp = r.json() if r.text else {{}}
-                st = resp.get("status", "")
-                if st in ("success", "uploaded_unverified"):
-                    os.remove(UPLOAD_FLAG)
-                    log.info(f"✅ Venv datasetga yuklandi! ({{size_gb:.1f}} GB, {{resp.get('size_gb','?')}} GB)")
-                    ok = True
-                    break
-                elif ci % 10 == 0:
-                    log.info(f"  Chunk {{ci+1}}/{{total_chunks}} ({{resp.get('received','?')}}/{{total_chunks}})")
-        if not ok:
-            log.warning(f"Venv upload muvaffaqiyatsiz, qayta uriniladi...")
-    except Exception as e:
-        log.warning(f"Venv upload xatosi: {{e}}")
-
 def keep_registering(url):
     attempt = 0
     while True:
@@ -325,10 +258,6 @@ def keep_registering(url):
             r = requests.post(f"{{ORCHESTRATOR_URL}}/register-node",
                 json={{"node_type": NODE_TYPE, "url": url}}, headers=headers, timeout=10)
             log.info(f"Register #{{attempt+1}}: {{r.status_code}} {{r.text[:80]}}")
-            if r.status_code == 200:
-                # Bug #6 fix: upload'ni alohida thread'da ishga tushiramiz —
-                # keep_registering bloklanmasin va registratsiya davom etsin.
-                threading.Thread(target=_upload_venv_if_needed, daemon=True).start()
         except Exception as e:
             log.warning(f"Register xatosi: {{e}}")
         attempt += 1
@@ -643,17 +572,13 @@ def _build_main_app_code(cfg):
 # =====================================================================
 # RUNNER KODI (run_server.py)
 # =====================================================================
-def _build_runner_code(cfg, encoded_main, code_hash, deltadata, kaggle_user, kaggle_api_token):
-    """Kaggle'da ishlaydigan bootstrap skripti."""
+def _build_runner_code(cfg, encoded_main):
+    """Kaggle'da ishlaydigan bootstrap skripti — faqat venv qurish + server ishga tushirish."""
     node_label = cfg["label"]
     apt_packages = cfg["apt_packages"]
-    dataset_slug = f"{kaggle_user}/{cfg['dataset_suffix']}"
-    dataset_name = cfg["dataset_suffix"]
-    node_type = cfg["node_type"]
-    deltadata_str = "true" if deltadata else "false"
     pip_commands_str = ",\n        ".join(f'"""{cmd}"""' for cmd in cfg["pip_commands"])
 
-    return f'''import os, sys, subprocess, hashlib, tarfile, json, base64, shutil, time
+    return f'''import os, sys, subprocess, base64
 
 print("{node_label} initialization starting...")
 
@@ -661,74 +586,22 @@ encoded_main = "{encoded_main}"
 with open("/kaggle/working/main_app.py", "w") as f:
     f.write(base64.b64decode(encoded_main).decode('utf-8'))
 
-VENV_HASH = "{code_hash}"
-DATASET_NAME = "{dataset_name}"
-DATASET_SLUG = "{dataset_slug}"
-DELTADATA = "{deltadata_str}"
-DATASET_PATH = f"/kaggle/input/{{DATASET_NAME}}"
+print("Python 3.10 + venv qurilmoqda...")
+os.system("DEBIAN_FRONTEND=noninteractive apt-get update -y")
+os.system(f"DEBIAN_FRONTEND=noninteractive apt-get install {apt_packages} -y")
+os.system("python3.10 -m venv /kaggle/working/venv")
 
-use_cache = False
+print("Kutubxonalar venv ichiga o'rnatilmoqda...")
+pip_cmds = [
+    {pip_commands_str}
+]
+for cmd in pip_cmds:
+    print(f"  $ {{cmd}}")
+    ret = os.system(cmd)
+    if ret != 0:
+        print(f"  Pip buyrug'i xato (exit={{ret}})")
 
-if not DELTADATA == "true" and os.path.isdir(DATASET_PATH):
-    hash_file = os.path.join(DATASET_PATH, "venv_hash.txt")
-    tar_file = os.path.join(DATASET_PATH, "venv.tar.gz")
-    if os.path.exists(hash_file) and os.path.exists(tar_file):
-        with open(hash_file) as f:
-            cached_hash = f.read().strip()
-        if cached_hash == VENV_HASH:
-            print("Cached venv topildi! Ko'chirilmoqda...")
-            subprocess.run(f"tar -xzf {{tar_file}} -C /kaggle/working/", shell=True, check=True)
-            use_cache = True
-        else:
-            print("Hash mismatch. Venv qayta quriladi.")
-    else:
-        print("Dataset mavjud lekin hash/tar topilmadi.")
-
-if not use_cache:
-    print("Python 3.10 + venv qurilmoqda...")
-    os.system("DEBIAN_FRONTEND=noninteractive apt-get update -y")
-    os.system(f"DEBIAN_FRONTEND=noninteractive apt-get install {apt_packages} -y")
-    os.system("python3.10 -m venv /kaggle/working/venv")
-
-    print("[1/2] Kutubxonalar venv ichiga o'rnatilmoqda...")
-    pip_cmds = [
-        {pip_commands_str}
-    ]
-    for cmd in pip_cmds:
-        print(f"  $ {{cmd}}")
-        ret = os.system(cmd)
-        if ret != 0:
-            print(f"  Pip buyrug'i xato (exit={{ret}})")
-
-    # ======== ARXIVLASH (tunnel orqali orchestrator yuklaydi) ========
-    print("[2/2] Venv arxivlanmoqda (orchestrator orqali dataset yuklanadi)...")
-
-    ds_dir = "/kaggle/working/_dataset"
-    os.makedirs(ds_dir, exist_ok=True)
-
-    tar_path = f"{{ds_dir}}/venv.tar.gz"
-    print("  Venv arxivlanmoqda...")
-    subprocess.run(f"tar -czf {{tar_path}} -C /kaggle/working venv", shell=True, check=True)
-    size_gb = os.path.getsize(tar_path) / 1024**3
-    print(f"  Venv hajmi: {{size_gb:.1f}} GB")
-
-    upload_info = {{
-        "tar_path": tar_path,
-        "dataset_slug": DATASET_SLUG,
-        "dataset_name": DATASET_NAME,
-        "venv_hash": VENV_HASH,
-        "kaggle_user": "{kaggle_user}",
-        "kaggle_key": "{kaggle_api_token}",
-        "deltadata": DELTADATA,
-        "node_type": "{node_type}",
-    }}
-    with open("/kaggle/working/.venv_upload_info", "w") as f:
-        json.dump(upload_info, f)
-    print("  Venv arxiv tayyor — tunnel ochilgach orchestrator'ga yuboriladi")
-else:
-    print("[1/2] Cached venv ishlatildi (pip o'tkazib yuborildi)")
-
-print("[2/2] Server ishga tushirilmoqda...")
+print("Server ishga tushirilmoqda...")
 os.system(f"/kaggle/working/venv/bin/python /kaggle/working/main_app.py")
 '''
 
@@ -913,7 +786,6 @@ def _display_nodes_from_orchestrator(nodes_data):
         gpus = info.get("gpus", [])
         url = info.get("url", "")
         error = info.get("error", "")
-        venv = info.get("venv", {})
         
         # Status emoji
         if status == "healthy":
@@ -944,34 +816,45 @@ def _display_nodes_from_orchestrator(nodes_data):
             print(f"     ❌ Yuklanmagan: {', '.join(missing)}")
         if error:
             print(f"     ⚠️  {error[:120]}")
-        
-        # Venv status
-        if venv:
-            _print_venv_status(venv)
     
     print()
 
 
-def _print_venv_status(venv):
-    """Venv holatini ko'rsatish."""
-    vstatus = venv.get("status", "idle")
-    vhash = venv.get("hash", "")
-    vsize = venv.get("size_gb", 0)
-    vchunks = venv.get("chunks", "")
-    verror = venv.get("error", "")
-    
-    status_map = {
-        "idle": ("⚪", "Venv: tayyor (o'zgarish yo'q)"),
-        "receiving": ("📥", f"Venv: chunk'lab yuborilmoqda ({vchunks})"),
-        "assembling": ("🔧", "Venv: yig'ilmoqda..."),
-        "uploading_kaggle": ("📤", f"Venv: Kaggle'ga yuklanmoqda ({vsize:.1f} GB, hash={vhash})"),
-        "verifying": ("🔍", f"Venv: tekshirilmoqda (5 ta urinish)..."),
-        "verified": ("✅", f"Venv: yuklandi! (hash={vhash})"),
-        "error": ("❌", f"Venv: xato — {verror[:80]}"),
-    }
-    
-    icon, msg = status_map.get(vstatus, ("❓", f"Venv: {vstatus}"))
-    print(f"     {icon} {msg}")
+def _parse_logs_for_info(kernel_id: str, logger_name: str):
+    """Kernel log'lardan GPU soni va model nomlarini ajratib olish."""
+    try:
+        result = subprocess.run(
+            ["kaggle", "kernels", "logs", kernel_id],
+            capture_output=True, text=True, timeout=15
+        )
+        lines = result.stdout.split("\n")
+        
+        gpu_count = None
+        models = []
+        
+        for line in lines:
+            if "GPU soni:" in line:
+                try:
+                    gpu_count = int(line.split("GPU soni:")[1].strip())
+                except ValueError:
+                    pass
+            if "Modellar:" in line and "tayyor" not in line:
+                models_str = line.split("Modellar:")[1].strip()
+                models = [m.strip() for m in models_str.split(",")]
+            if "[1/2]" in line or "[2/2]" in line:
+                parts = line.split("]")
+                if len(parts) > 1:
+                    model_desc = parts[1].split("(")[0].strip() if "(" in parts[1] else parts[1].strip()
+                    if model_desc and len(model_desc) > 3:
+                        models.append(model_desc)
+        
+        if gpu_count is not None:
+            print(f"     GPU soni: {gpu_count}")
+        if models:
+            unique_models = list(dict.fromkeys(models))
+            print(f"     Modellar: {', '.join(unique_models[:5])}")
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
 
 
 def _monitor_via_kaggle_cli():
@@ -1008,54 +891,6 @@ def _monitor_via_kaggle_cli():
         except (subprocess.SubprocessError, FileNotFoundError) as e:
             print(f"     ⚠️  Xatolik: {e}")
     print()
-
-
-def _parse_logs_for_info(kernel_id: str, logger_name: str):
-    """Kernel log'lardan GPU soni va model nomlarini ajratib olish."""
-    try:
-        result = subprocess.run(
-            ["kaggle", "kernels", "logs", kernel_id],
-            capture_output=True, text=True, timeout=15
-        )
-        lines = result.stdout.split("\n")
-        
-        gpu_count = None
-        models = []
-        
-        for line in lines:
-            # GPU soni: X
-            if "GPU soni:" in line:
-                try:
-                    gpu_count = int(line.split("GPU soni:")[1].strip())
-                except ValueError:
-                    pass
-            
-            # Model nomlari: "Modellar tayyor!" yoki "Modellar: xxx"
-            if "Modellar:" in line and "tayyor" not in line:
-                models_str = line.split("Modellar:")[1].strip()
-                models = [m.strip() for m in models_str.split(",")]
-            elif "Modellar tayyor" in line:
-                # Node-0 da "Modellar tayyor!" — oldingi qatorlardan model nomini topish
-                pass
-            
-            # Node-0 specific: "[1/2] Sayro TTS" yoki "[2/2] Miyya LLM"
-            if "[1/2]" in line or "[2/2]" in line:
-                # Model yuklanayotgan qator — nomini ajratib olish
-                parts = line.split("]")
-                if len(parts) > 1:
-                    model_desc = parts[1].split("(")[0].strip() if "(" in parts[1] else parts[1].strip()
-                    if model_desc and len(model_desc) > 3:
-                        models.append(model_desc)
-        
-        if gpu_count is not None:
-            print(f"     GPU soni: {gpu_count}")
-        if models:
-            # Deduplicate
-            unique_models = list(dict.fromkeys(models))
-            print(f"     Modellar: {', '.join(unique_models[:5])}")
-            
-    except (subprocess.SubprocessError, FileNotFoundError):
-        pass
 
 
 # =====================================================================
@@ -1155,39 +990,17 @@ def _launch_node(node: int, dry_run: bool = False):
     main_app_code = _build_main_app_code(cfg)
     encoded_main = base64.b64encode(main_app_code.encode("utf-8")).decode("utf-8")
 
-    # --- Kod hash va delta aniqlash ---
-    code_hash = hashlib.sha256(
-        ("\n".join(cfg["pip_commands"]) + encoded_main).encode()
-    ).hexdigest()[:16]
-
-    env_prefix = cfg["env_prefix"]
-    stored_hash = os.environ.get(f"{env_prefix}_VENV_HASH", "")
-    stored_path = os.environ.get(f"{env_prefix}_DATASET_PATH", "")
-    deltadata = (stored_hash != code_hash) if stored_hash else True
-
     print(f"\n{'='*60}")
     print(f"  {cfg['label']}: {kaggle_user}/{cfg['kernel_suffix']}")
     print(f"{'='*60}")
 
-    if deltadata:
-        print(f"🔄 DELTA ANIQLANDI! (eski={stored_hash[:8] if stored_hash else 'yoq'}, yangi={code_hash[:8]})")
-        print("   Eski dataset ishlatilmaydi, venv yangidan quriladi.")
-    else:
-        print(f"✅ Kod o'zgarmagan (hash={code_hash[:8]}). Dataset ishlatiladi: {stored_path}")
-
-    dataset_exists = bool(stored_path) and not deltadata
-
     # --- Runner kodi (run_server.py) ---
-    runner_code = _build_runner_code(
-        cfg, encoded_main, code_hash, deltadata, kaggle_user, kaggle_api_token
-    )
+    runner_code = _build_runner_code(cfg, encoded_main)
     with open(os.path.join(node_dir, "run_server.py"), "w") as f:
         f.write(runner_code)
 
     # --- Metadata (kernel-metadata.json) ---
     dataset_sources = list(cfg.get("extra_dataset_sources", []))
-    if dataset_exists:
-        dataset_sources.append(stored_path)
 
     metadata = json.dumps({
         "id": f"{kaggle_user}/{cfg['kernel_suffix']}",
@@ -1223,7 +1036,6 @@ def _launch_node(node: int, dry_run: bool = False):
                 pass
 
     kernel_id = f"{kaggle_user}/{cfg['kernel_suffix']}"
-    print(f"📊 Delta: {deltadata}, Hash: {code_hash[:8]}, Dataset: {dataset_sources}")
 
     # --- Avto-delete: eski kernel'ni o'chirish (running bo'lsa ham) ---
     print(f"🗑️  Eski kernel tekshirilmoqda: {kernel_id}...")
