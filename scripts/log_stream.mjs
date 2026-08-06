@@ -6,9 +6,9 @@
  * Log'lar aralashmaydi, har panel mustaqil scroll qiladi.
  *
  * Ishlatish:
- *   node scripts/log_stream.mjs              # barcha 3 node
- *   node scripts/log_stream.mjs --node 0     # faqat Node-0
- *   node scripts/log_stream.mjs --node 0,2   # Node-0 + 2
+ *   npm run logs                            # barcha 3 node
+ *   npm run logs:0                          # faqat Node-0
+ *   node scripts/log_stream.mjs --node 0,2  # Node-0 + 2
  *
  * Klavishlar:
  *   1/2/3      — Node paneliga fokus
@@ -24,7 +24,6 @@ import dotenv from 'dotenv';
 import { spawn } from 'child_process';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { readFileSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -74,7 +73,6 @@ function makeEnv(nodeIdx) {
   const env = { ...process.env };
   env.KAGGLE_USERNAME = user;
   env.KAGGLE_KEY = key;
-  // Remove global KAGGLE_API_TOKEN to avoid cross-account auth
   delete env.KAGGLE_API_TOKEN;
   return env;
 }
@@ -108,48 +106,44 @@ function createTUI(nodes) {
   const screen = blessed.screen({
     smartCSR: true,
     title: 'Kaggle Node Log Streamer',
-    dockBorders: true,
     fullUnicode: true,
   });
 
-  // Help bar at the bottom
+  // Bottom help bar
   const helpBar = blessed.box({
     bottom: 0,
     left: 0,
     width: '100%',
     height: 1,
-    content: ' 1/2/3: fokus | ↑↓: scroll | Tab: keyingi | q: chiqish',
-    style: {
-      fg: 'black',
-      bg: 'white',
-      bold: true,
-    },
+    content: ' 1/2/3: fokus panel | ↑↓: scroll | Tab: keyingi | q: chiqish',
+    style: { fg: 'black', bg: 'white', bold: true },
   });
 
-  // Create a panel for each node
   const panels = {};
   const streams = {};
-  const logLines = {};
+  const textBuffers = {};
   let focusedIdx = nodes[0];
 
   nodes.forEach((n, i) => {
     const cfg = NODES[n];
-    logLines[n] = [];
+    textBuffers[n] = [];
+    const { user } = getAuth(n);
 
-    // Calculate position — stack vertically
+    // Panel height: equal split
+    const top = i === 0 ? 0 : `${Math.floor(i * 100 / nodes.length)}%`;
     const height = `${Math.floor(100 / nodes.length)}%-1`;
 
-    const panel = blessed.log({
-      top: i === 0 ? 0 : `${Math.floor(i * 100 / nodes.length)}%`,
+    const panel = blessed.box({
+      top,
       left: 0,
       width: '100%',
-      height: height,
+      height,
       border: { type: 'line' },
       label: ` ${cfg.label} `,
-      tags: true,
+      tags: false,
       scrollable: true,
       alwaysScroll: true,
-      scrollbar: { ch: ' ', track: { bg: 'grey' }, style: { inverse: true } },
+      scrollbar: { ch: ' ', style: { inverse: true } },
       mouse: true,
       keys: true,
       vi: true,
@@ -158,13 +152,9 @@ function createTUI(nodes) {
         label: { fg: cfg.color, bold: true },
         scrollbar: { bg: cfg.color },
       },
+      // Pre-fill with initial content
+      content: `🔌 Ulanilmoqda... (kernel: ${cfg.kernel})\n   Akkaunt: ${user}\n`,
     });
-
-    // Initial content
-    const { user } = getAuth(n);
-    panel.log(`🔌 Ulanilmoqda... (kernel: ${cfg.kernel})`);
-    panel.log(`   Akkaunt: ${user}`);
-    panel.log('');
 
     panels[n] = panel;
     screen.append(panel);
@@ -179,33 +169,42 @@ function createTUI(nodes) {
   }
 
   // ============================================================
+  // Helper: append text to panel
+  // ============================================================
+
+  function appendToPanel(n, line) {
+    textBuffers[n].push(line);
+    if (textBuffers[n].length > 500) {
+      textBuffers[n] = textBuffers[n].slice(-500);
+    }
+    panels[n].setContent(textBuffers[n].join('\n'));
+    // Auto-scroll to bottom (unless user is actively scrolling up)
+    panels[n].setScrollPerc(100);
+  }
+
+  // ============================================================
   // Key bindings
   // ============================================================
 
+  function focusPanel(n) {
+    focusedIdx = n;
+    nodes.forEach(x => {
+      panels[x].style.border = { fg: NODES[x].color };
+    });
+    panels[n].focus();
+    panels[n].style.border = { fg: NODES[n].color, bold: true };
+    screen.render();
+  }
+
   screen.key(['1', '2', '3'], (ch) => {
     const n = parseInt(ch);
-    if (panels[n]) {
-      focusedIdx = n;
-      // Reset all borders
-      nodes.forEach(x => {
-        panels[x].style.border = { fg: NODES[x].color };
-      });
-      panels[n].focus();
-      panels[n].style.border = { fg: NODES[n].color, bold: true };
-      screen.render();
-    }
+    if (panels[n]) focusPanel(n);
   });
 
   screen.key(['tab'], () => {
     const idx = nodes.indexOf(focusedIdx);
     const nextIdx = (idx + 1) % nodes.length;
-    focusedIdx = nodes[nextIdx];
-    nodes.forEach(x => {
-      panels[x].style.border = { fg: NODES[x].color };
-    });
-    panels[focusedIdx].focus();
-    panels[focusedIdx].style.border = { fg: NODES[focusedIdx].color, bold: true };
-    screen.render();
+    focusPanel(nodes[nextIdx]);
   });
 
   screen.key(['q', 'C-c'], () => {
@@ -219,10 +218,10 @@ function createTUI(nodes) {
 
   nodes.forEach(n => {
     const cfg = NODES[n];
-    const { user, key } = getAuth(n);
+    const { key } = getAuth(n);
 
     if (!key) {
-      panels[n].log(`⚠️  Kaggle kaliti topilmadi (${cfg.keyEnv})`);
+      appendToPanel(n, `⚠️  Kaggle kaliti topilmadi (${cfg.keyEnv})`);
       screen.render();
       return;
     }
@@ -234,30 +233,30 @@ function createTUI(nodes) {
     });
 
     streams[n] = child;
+    let firstLine = true;
 
     child.stdout.on('data', (data) => {
       const lines = data.toString().split('\n').filter(l => l.trim());
       lines.forEach(line => {
-        panels[n].log(line);
-        logLines[n].push(line);
-        // Keep only last 1000 lines in memory
-        if (logLines[n].length > 1000) logLines[n].shift();
+        if (line) {
+          appendToPanel(n, line);
+        }
       });
       screen.render();
     });
 
     child.stderr.on('data', (data) => {
-      panels[n].log(`⚠️  ${data.toString().trim()}`);
+      appendToPanel(n, `⚠️  ${data.toString().trim()}`);
       screen.render();
     });
 
     child.on('close', (code) => {
-      panels[n].log(`── Stream uzildi (exit=${code}) ──`);
+      appendToPanel(n, `── Stream uzildi (exit=${code}) ──`);
       screen.render();
     });
 
     child.on('error', (err) => {
-      panels[n].log(`❌ Xatolik: ${err.message}`);
+      appendToPanel(n, `❌ Xatolik: ${err.message}`);
       screen.render();
     });
   });
@@ -269,16 +268,12 @@ function createTUI(nodes) {
   function cleanup() {
     nodes.forEach(n => {
       if (streams[n]) {
-        streams[n].kill();
+        try { streams[n].kill(); } catch (e) {}
       }
     });
   }
 
   screen.on('destroy', cleanup);
-
-  // ============================================================
-  // Render
-  // ============================================================
 
   screen.render();
   return screen;
@@ -292,7 +287,7 @@ function main() {
   const nodes = parseArgs();
 
   if (nodes.length === 0) {
-    console.log('Noto\'g\'ri node raqami. 0, 1, 2, all');
+    console.log("Noto'g'ri node raqami. 0, 1, 2, all");
     process.exit(1);
   }
 
