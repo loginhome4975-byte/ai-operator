@@ -11,12 +11,14 @@
  *   node scripts/log_stream.mjs --node 0,2  # Node-0 + 2
  *
  * Klavishlar:
- *   1/2/3      — Node paneliga fokus
- *   Tab        — Keyingi panel
- *   Yuqori/Past — Scroll
- *   PageUp/Dn  — Sahifa bo'ylab scroll
- *   Home/End   — Boshiga/oxiriga o'tish
- *   q / Ctrl+C — Chiqish
+ *   1/2/3       — Panelga fokus
+ *   Tab / ]     — Keyingi panel
+ *   Shift+Tab / [ — Oldingi panel
+ *   Sichqoncha   — Panel ustiga bosish
+ *   ↑↓           — Scroll (chegarada keyingi panel)
+ *   PageUp/Dn    — Sahifa bo'ylab
+ *   Home/End     — Boshiga/oxiriga
+ *   q / Ctrl+C   — Chiqish
  */
 
 import blessed from 'blessed';
@@ -125,19 +127,30 @@ function createTUI(nodes) {
     fullUnicode: true,
   });
 
-  // Bottom help bar
+  // Bottom help bar — shows current focus
+  function updateHelpBar() {
+    const colorNames = { green: '🟢', cyan: '🔵', magenta: '🟣' };
+    const fc = NODES[focusedIdx].color;
+    helpBar.setContent(
+      ` ${colorNames[fc] || '●'} Node-${focusedIdx} faol | ` +
+      `Tab/]: keyingi | Shift+Tab/[: oldingi | ↑↓: scroll | q: chiqish | ` +
+      `Sichqoncha: panel tanlash`
+    );
+    screen.render();
+  }
+
   const helpBar = blessed.box({
     bottom: 0,
     left: 0,
     width: '100%',
     height: 1,
-    content: ' 1/2/3: fokus panel | ↑↓: scroll | Tab: keyingi | q: chiqish',
     style: { fg: 'black', bg: 'white', bold: true },
   });
 
   const panels = {};
   const streams = {};
   const textBuffers = {};
+  const userScrolled = {};  // user manual scroll qilganmi?
   let focusedIdx = nodes[0];
 
   nodes.forEach((n, i) => {
@@ -163,13 +176,30 @@ function createTUI(nodes) {
       mouse: true,
       keys: true,
       vi: true,
+      clickable: true,
       style: {
         border: { fg: cfg.color },
         label: { fg: cfg.color, bold: true },
         scrollbar: { bg: cfg.color },
+        focus: { border: { fg: cfg.color, bold: true } },
       },
       // Pre-fill with initial content
       content: `🔌 Ulanilmoqda... (kernel: ${cfg.kernel})\n   Akkaunt: ${user}\n`,
+    });
+
+    // Mouse click: focus this panel
+    panel.on('click', () => focusPanel(n));
+
+    // Track manual scrolling — agar user yuqoriga scroll qilsa, auto-scroll to'xtaydi
+    userScrolled[n] = false;
+    panel.on('scroll', () => {
+      // Agar user scroll qilgan bo'lsa va pastda emas, auto-scroll'ni o'chir
+      const sp = panel.getScrollPerc();
+      if (sp < 100) {
+        userScrolled[n] = true;
+      } else {
+        userScrolled[n] = false;
+      }
     });
 
     panels[n] = panel;
@@ -182,6 +212,7 @@ function createTUI(nodes) {
   if (panels[focusedIdx]) {
     panels[focusedIdx].focus();
     panels[focusedIdx].style.border = { fg: NODES[focusedIdx].color, bold: true };
+    updateHelpBar();
   }
 
   // ============================================================
@@ -194,8 +225,10 @@ function createTUI(nodes) {
       textBuffers[n] = textBuffers[n].slice(-500);
     }
     panels[n].setContent(textBuffers[n].join('\n'));
-    // Auto-scroll to bottom (unless user is actively scrolling up)
-    panels[n].setScrollPerc(100);
+    // Auto-scroll faqat user yuqoriga scroll qilmagan bo'lsa
+    if (!userScrolled[n]) {
+      panels[n].setScrollPerc(100);
+    }
   }
 
   // ============================================================
@@ -203,26 +236,45 @@ function createTUI(nodes) {
   // ============================================================
 
   function focusPanel(n) {
+    if (focusedIdx === n) return; // already focused
     focusedIdx = n;
     nodes.forEach(x => {
       panels[x].style.border = { fg: NODES[x].color };
     });
     panels[n].focus();
     panels[n].style.border = { fg: NODES[n].color, bold: true };
-    screen.render();
+    updateHelpBar();
   }
 
+  function nextPanel() {
+    const idx = nodes.indexOf(focusedIdx);
+    focusPanel(nodes[(idx + 1) % nodes.length]);
+  }
+
+  function prevPanel() {
+    const idx = nodes.indexOf(focusedIdx);
+    focusPanel(nodes[(idx - 1 + nodes.length) % nodes.length]);
+  }
+
+  // Number keys: direct panel focus
   screen.key(['1', '2', '3'], (ch) => {
     const n = parseInt(ch);
     if (panels[n]) focusPanel(n);
   });
 
-  screen.key(['tab'], () => {
-    const idx = nodes.indexOf(focusedIdx);
-    const nextIdx = (idx + 1) % nodes.length;
-    focusPanel(nodes[nextIdx]);
-  });
+  // Tab / ] : next panel
+  screen.key(['tab', ']'], () => nextPanel());
 
+  // Shift+Tab / [ : previous panel
+  screen.key(['S-tab', '['], () => prevPanel());
+
+  // Arrow keys at boundary: switch panel
+  // (blessed'da scroll chegarasida key event'ni qo'lga olish qiyin,
+  //  shuning uchun Ctrl+↑/Ctrl+↓ bilan panel almashinuvi)
+  screen.key(['C-up'], () => prevPanel());
+  screen.key(['C-down'], () => nextPanel());
+
+  // Quit
   screen.key(['q', 'C-c'], () => {
     cleanup();
     process.exit(0);
