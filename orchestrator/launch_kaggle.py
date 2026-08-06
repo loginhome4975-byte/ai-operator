@@ -856,30 +856,43 @@ def _monitor_nodes():
     import urllib.request
     import urllib.error
     
-    orch_url = os.environ.get("ORCHESTRATOR_URL", "https://orchestrator.traffix.uz")
+    orch_url = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
     api_key = os.environ.get("ORCHESTRATOR_API_KEY", "")
     
     print(f"\n{'='*70}")
     print(f"  📡 NODE MONITORING")
     print(f"{'='*70}")
     
+    # URL'lar ro'yxati — avval localhost, keyin env URL
+    urls_to_try = ["http://localhost:8000"]
+    if orch_url and orch_url != "http://localhost:8000":
+        urls_to_try.append(orch_url)
+    
     # 1. Orchestrator orqali urinib ko'rish
     if api_key:
-        try:
-            req = urllib.request.Request(
-                f"{orch_url}/api/nodes/status",
-                headers={"X-API-Key": api_key}
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-                nodes_data = data.get("nodes", {})
-                
-                if nodes_data:
-                    _display_nodes_from_orchestrator(nodes_data)
-                    return
-        except Exception as e:
-            print(f"  ⚠️  Orchestrator ulanmadi: {e}")
-            print(f"  Kaggle CLI orqali tekshirilmoqda...\n")
+        for url in urls_to_try:
+            try:
+                full_url = f"{url}/api/nodes/status"
+                req = urllib.request.Request(
+                    full_url,
+                    headers={"X-API-Key": api_key}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                    nodes_data = data.get("nodes", {})
+                    
+                    if nodes_data:
+                        print(f"  ✅ Manba: {url}")
+                        _display_nodes_from_orchestrator(nodes_data)
+                        return
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    print(f"  ⚠️  {url} — endpoint topilmadi (orchestrator'ni restart qiling)")
+                else:
+                    print(f"  ⚠️  {url} — HTTP {e.code}")
+            except Exception as e:
+                print(f"  ⚠️  {url} — ulanmadi: {e}")
+        print(f"  Kaggle CLI orqali tekshirilmoqda...\n")
     
     # 2. Fallback: Kaggle CLI
     _monitor_via_kaggle_cli()
