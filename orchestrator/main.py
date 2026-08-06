@@ -600,16 +600,13 @@ _node_registration_lock = asyncio.Lock()
 _env_update_lock = threading.Lock()
 
 
-def _get_node_index_from_slug(dataset_slug: str) -> str:
-    """dataset_slug dan node index'ni aniqlash.
-    Masalan: 'bunyodbek7/ai-operator-node0-venv' -> '0'
-             'bunyodozodboyev/ai-operator-node1-venv' -> '1'
-             'bunyodbekozodboyev/ai-operator-node2-venv' -> '2'
+def _get_node_index_from_type(node_type: str) -> str:
+    """node_type dan node index'ni aniqlash (regex o'rniga to'g'ridan-to'g'ri mapping).
+    'kaggle' -> '0', 'kaggle1' -> '1', 'kaggle2' -> '2'
     """
-    m = re.search(r'node(\d)', dataset_slug)
-    if m:
-        return m.group(1)
-    return "0"
+    mapping = {"kaggle": "0", "kaggle1": "1", "kaggle2": "2"}
+    return mapping.get(node_type, "0")
+
 
 
 def _update_env(key: str, value: str):
@@ -655,6 +652,7 @@ async def upload_venv(
     total_chunks: str = Form(default="1"),
     upload_id: str = Form(default=""),
     file_sha256: str = Form(default=""),
+    node_type: str = Form(default="kaggle"),
     _: str = Depends(verify_node_key),
 ):
     """Kaggle node'lardan venv arxivini CHUNK'lab qabul qilish.
@@ -672,8 +670,21 @@ async def upload_venv(
     uid = upload_id or dataset_slug
     is_delta = deltadata.lower() == "true"
     
-    # Chunk'lar uchun temp papka
-    chunk_dir = f"/tmp/venv_chunks_{uid.replace('/', '_')}"
+    # Chunk'lar uchun temp papka — avval shu dataset uchun eski orfon
+    # chunk_dir'larni tozalaymiz (oldingi upload uzilib qolgan bo'lsa).
+    _chunk_base = f"/tmp/venv_chunks_{uid.replace('/', '_')}"
+    chunk_dir = _chunk_base
+    # Eski chunk'larni tozalash: yangi upload_id kelsa, oldingi qoldiqlarni o'chiramiz
+    if c_idx == 0:
+        _ds_key = dataset_slug.replace('/', '_')
+        import glob as _glob
+        for _old_dir in _glob.glob(f"/tmp/venv_chunks_{_ds_key}_*"):
+            if _old_dir != chunk_dir and os.path.isdir(_old_dir):
+                try:
+                    shutil.rmtree(_old_dir, ignore_errors=True)
+                    log.info(f"[UPLOAD-VENV] 🧹 Eski chunk dir tozalandi: {os.path.basename(_old_dir)}")
+                except Exception:
+                    pass
     os.makedirs(chunk_dir, exist_ok=True)
     
     try:
@@ -798,37 +809,38 @@ async def upload_venv(
             
             log.info(f"[UPLOAD-VENV] Kaggle API yuklash yuborildi.")
             
-            # Tekshirish
+            # Tekshirish (5 urinish, 20s pauza — katta dataset sekinroq index'lanadi)
             verified = False
-            for attempt in range(3):
-                await asyncio.sleep(10)
+            for attempt in range(5):
+                await asyncio.sleep(20)
                 try:
                     fl = api.dataset_list_files(usr, dataset_name)
                     fnames = [str(f) for f in (fl.files if hasattr(fl, 'files') else [])]
                     if "venv_hash.txt" in fnames:
-                        log.info(f"[UPLOAD-VENV] ✅ Dataset tasdiqlandi!")
+                        log.info(f"[UPLOAD-VENV] ✅ Dataset tasdiqlandi! (urinish {attempt+1}/5)")
                         verified = True
                         break
                 except Exception as e:
-                    log.warning(f"[UPLOAD-VENV] Tekshiruv {attempt+1}/3: {e}")
+                    log.warning(f"[UPLOAD-VENV] Tekshiruv {attempt+1}/5: {e}")
             
-            if not verified:
-                log.warning(f"[UPLOAD-VENV] ⚠️  Dataset 3 urinishda tasdiqlanmadi.")
-            
-            # .env ga saqlash
-            node_idx = _get_node_index_from_slug(dataset_slug)
+            # .env ga FAQAT verification o'tganda yozamiz (#1 bug fix)
+            node_idx = _get_node_index_from_type(node_type)
             env_path_key = f"NODE{node_idx}_DATASET_PATH"
             env_hash_key = f"NODE{node_idx}_VENV_HASH"
-            _update_env(env_path_key, dataset_slug)
-            _update_env(env_hash_key, venv_hash)
-            log.info(f"[UPLOAD-VENV] ✅ {env_path_key}={dataset_slug} .env'ga yozildi")
+            
+            if verified:
+                _update_env(env_path_key, dataset_slug)
+                _update_env(env_hash_key, venv_hash)
+                log.info(f"[UPLOAD-VENV] ✅ {env_path_key}={dataset_slug} .env'ga yozildi")
+            else:
+                log.warning(f"[UPLOAD-VENV] ⚠️  Dataset 5 urinishda tasdiqlanmadi — .env YOZILMADI!")
             
             return {
                 "status": "success" if verified else "uploaded_unverified",
                 "dataset": dataset_slug, "hash": venv_hash[:8],
                 "size_gb": round(total_size / 1024**3, 2),
                 "verified": verified, "chunks": c_total,
-                "env_saved": {env_path_key: dataset_slug, env_hash_key: venv_hash},
+                "env_saved": {env_path_key: dataset_slug, env_hash_key: venv_hash} if verified else {},
             }
         finally:
             if old_kg is not None:
