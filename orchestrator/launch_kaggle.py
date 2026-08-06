@@ -351,16 +351,25 @@ def _build_server_body(cfg):
 
 def _node0_body():
     """Node-0: Miyya Qwen 7B (LLM) + Sayro TTS 1.7B (UZ)."""
-    return '''log.info("[1/2] Sayro TTS (CUDA:1)...")
-import torch
+    return '''import torch
+
+# --- GPU aniqlash ---
+ngpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+log.info(f"GPU soni: {ngpus}")
+if ngpus == 0:
+    log.warning("CUDA mavjud emas! Modellar ishlamaydi.")
+dev_tts = f"cuda:{1 if ngpus >= 2 else 0}" if ngpus >= 1 else "cpu"
+dev_llm = "cuda:0" if ngpus >= 1 else "cpu"
+
+log.info(f"[1/2] Sayro TTS ({dev_tts})...")
 from qwen_tts import Qwen3TTSModel
-tts = Qwen3TTSModel.from_pretrained("uzlm/sayro-tts-1.7B", device_map="cuda:1", dtype=torch.float16)
+tts = Qwen3TTSModel.from_pretrained("uzlm/sayro-tts-1.7B", device_map=dev_tts, dtype=torch.float16 if ngpus >= 1 else torch.float32)
 _speakers = tts.get_supported_speakers() if hasattr(tts, "get_supported_speakers") else []
 _speaker = _speakers[0] if _speakers else "default"
 _langs = tts.get_supported_languages() if hasattr(tts, "get_supported_languages") else []
 _lang = "uz" if "uz" in _langs else (_langs[0] if _langs else "uz")
 
-log.info("[2/2] Miyya LLM GGUF (CUDA:0)...")
+log.info(f"[2/2] Miyya LLM GGUF ({dev_llm})...")
 import glob
 from llama_cpp import Llama
 gguf_files = glob.glob("/kaggle/input/**/*.gguf", recursive=True)
@@ -428,23 +437,29 @@ def _node1_body():
     return '''import torch
 from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
 
-device_stt, device_tts = "cuda:0", "cuda:1"
-dt = torch.float16
+# --- GPU aniqlash ---
+ngpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+log.info(f"GPU soni: {ngpus}")
+if ngpus == 0:
+    log.warning("CUDA mavjud emas! Modellar ishlamaydi.")
+dev_stt = f"cuda:0" if ngpus >= 1 else "cpu"
+dev_tts = f"cuda:{1 if ngpus >= 2 else 0}" if ngpus >= 1 else "cpu"
+dt = torch.float16 if ngpus >= 1 else torch.float32
 
-log.info("[1/2] Whisper large-v3 RU STT (CUDA:0)...")
+log.info(f"[1/2] Whisper large-v3 RU STT ({dev_stt})...")
 stt_model = AutoModelForSpeechSeq2Seq.from_pretrained(
     "openai/whisper-large-v3", torch_dtype=dt, low_cpu_mem_usage=True, use_safetensors=True
-).to(device_stt)
+).to(dev_stt)
 stt_processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
 stt_pipe = pipeline("automatic-speech-recognition", model=stt_model,
     tokenizer=stt_processor.tokenizer, feature_extractor=stt_processor.feature_extractor,
-    torch_dtype=dt, device=device_stt)
+    torch_dtype=dt, device=dev_stt)
 
-log.info("[2/2] Chatterbox Multilingual TTS RU/EN (CUDA:1)...")
+log.info(f"[2/2] Chatterbox Multilingual TTS RU/EN ({dev_tts})...")
 try:
     import torchaudio as ta
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-    tts_pipe = ChatterboxMultilingualTTS.from_pretrained(device="cuda:1", t3_model="v3")
+    tts_pipe = ChatterboxMultilingualTTS.from_pretrained(device=dev_tts, t3_model="v3")
     _speaker = None
 except Exception as e:
     log.warning(f"Chatterbox TTS yuklanmadi: {e}")
@@ -516,16 +531,22 @@ def _node2_body():
     return '''import torch, traceback
 from transformers import pipeline
 
-device_en, device_uz = "cuda:0", "cuda:1"
-dt = torch.float16
+# --- GPU aniqlash ---
+ngpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+log.info(f"GPU soni: {ngpus}")
+if ngpus == 0:
+    log.warning("CUDA mavjud emas! Modellar ishlamaydi.")
+dev_en = f"cuda:0" if ngpus >= 1 else "cpu"
+dev_uz = f"cuda:{1 if ngpus >= 2 else 0}" if ngpus >= 1 else "cpu"
+dt = torch.float16 if ngpus >= 1 else torch.float32
 models_ok = []
 en_model_error = None
 
-log.info("[1/2] Canary-Qwen 2.5B EN STT (CUDA:0)...")
+log.info(f"[1/2] Canary-Qwen 2.5B EN STT ({dev_en})...")
 try:
     from nemo.collections.speechlm2.models import SALM
     en_model = SALM.from_pretrained("nvidia/canary-qwen-2.5b")
-    en_model = en_model.to(device_en).eval()
+    en_model = en_model.to(dev_en).eval()
     models_ok.append("canary-qwen-2.5b-en")
 except Exception as e:
     en_model_error = traceback.format_exc()
@@ -535,7 +556,7 @@ except Exception as e:
 log.info("[2/2] Kotib/uzbek_stt_v1 UZ STT (CUDA:1)...")
 try:
     uz_pipe = pipeline("automatic-speech-recognition", model="Kotib/uzbek_stt_v1",
-                       torch_dtype=dt, device=device_uz)
+                       torch_dtype=dt, device=dev_uz)
     models_ok.append("kotib-uz")
 except Exception as e:
     log.error(f"UZ STT yuklanmadi: {e}")
