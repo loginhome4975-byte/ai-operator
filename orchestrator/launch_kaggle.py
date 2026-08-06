@@ -1037,7 +1037,7 @@ def _launch_node(node: int, dry_run: bool = False):
         print(f"   ⚠️  Status tekshirishda xatolik (davom etilmoqda): {e}")
 
     print("Tayyor! Kagglega API orqali yuborilmoqda...")
-    subprocess.run(["kaggle", "kernels", "push", "-p", node_dir])
+    subprocess.run(["kaggle", "kernels", "push", "-p", node_dir, "--accelerator", "nvidiaTeslaT4x2"])
     print(f"✅ {cfg['label']} Kernel yuborildi!")
 
 
