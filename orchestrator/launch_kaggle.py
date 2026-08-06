@@ -10,6 +10,7 @@ Ishlatish:
     python3 launch_kaggle.py --node 2   # Node-2: STT (EN) + STT (UZ)
     python3 launch_kaggle.py --all      # Barcha 3 node
     python3 launch_kaggle.py -d         # Barcha akkauntdagi kernel'larni o'chirish
+    python3 launch_kaggle.py -i         # GPU/TPU kvota ma'lumoti
     python3 launch_kaggle.py --node 0 --dry-run   # faqat fayllarni generatsiya qiladi
 
 Har bir node alohida Kaggle akkauntiga tegishli (.env dan o'qiladi):
@@ -712,6 +713,120 @@ os.system(f"/kaggle/working/venv/bin/python /kaggle/working/main_app.py")
 
 
 # =====================================================================
+# KVOTA MA'LUMOTI (-i)
+# =====================================================================
+def _show_quota():
+    """Barcha 3 akkaunt uchun GPU/TPU kvotalarini ko'rsatadi."""
+    print(f"\n{'='*70}")
+    print(f"  📊 KAGGLE GPU / TPU KVOTA MA'LUMOTI")
+    print(f"{'='*70}")
+
+    totals = {"gpu_used": 0.0, "gpu_remaining": 0.0, "gpu_total": 0.0,
+              "tpu_used": 0.0, "tpu_remaining": 0.0, "tpu_total": 0.0}
+
+    for node in [0, 1, 2]:
+        cfg = NODE_CONFIGS[node]
+        user, token = _resolve_account(node)
+
+        # kaggle.json tozalash (env orqali auth)
+        kaggle_dir = os.path.expanduser("~/.kaggle")
+        json_path = os.path.join(kaggle_dir, "kaggle.json")
+        if os.path.exists(json_path):
+            try:
+                os.remove(json_path)
+            except Exception:
+                pass
+
+        print(f"\n  {cfg['label']}: {user}")
+        print(f"  {'-'*50}")
+
+        try:
+            result = subprocess.run(
+                ["kaggle", "quota"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode != 0:
+                print(f"     ⚠️  Kvota olinmadi: {result.stderr[:100]}")
+                continue
+        except (subprocess.SubprocessError, FileNotFoundError) as e:
+            print(f"     ⚠️  Xatolik: {e}")
+            continue
+
+        # kaggle quota jadvalini parse qilish:
+        # resource  used    remaining  total   refreshAt
+        # --------  ------  ---------  ------  -------------------
+        # GPU       16.05h  13.95h     30.00h  2026-08-08T00:00:00
+        # TPU       0.00h   20.00h     20.00h  2026-08-08T00:00:00
+        lines = result.stdout.strip().split("\n")
+        gpu_info = None
+        tpu_info = None
+        refresh_at = "?"
+
+        for line in lines[2:]:  # header'larni o'tkazib yuborish
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            resource = parts[0]
+            if resource == "GPU":
+                gpu_info = {"used": parts[1], "remaining": parts[2],
+                           "total": parts[3], "refresh": parts[4] if len(parts) > 4 else "?"}
+                refresh_at = gpu_info["refresh"]
+            elif resource == "TPU":
+                tpu_info = {"used": parts[1], "remaining": parts[2],
+                           "total": parts[3], "refresh": parts[4] if len(parts) > 4 else "?"}
+
+        def _parse_hours(val: str) -> float:
+            """'16.05h' yoki '30.00h' -> float."""
+            if val.endswith("h"):
+                val = val[:-1]
+            try:
+                return float(val)
+            except ValueError:
+                return 0.0
+
+        if gpu_info:
+            used_h = _parse_hours(gpu_info["used"])
+            remain_h = _parse_hours(gpu_info["remaining"])
+            total_h = _parse_hours(gpu_info["total"])
+            pct = (used_h / total_h * 100) if total_h > 0 else 0
+            bar_len = 20
+            filled = int(bar_len * pct / 100)
+            bar = "█" * filled + "░" * (bar_len - filled)
+
+            print(f"     GPU:   {bar}  {pct:.0f}%")
+            print(f"            Used: {used_h:.1f}h  |  Qolgan: {remain_h:.1f}h  |  Jami: {total_h:.0f}h/hafta")
+            # Kunlik/soatlik taxminiy bo'linma
+            days_left = 7 - (pct / 100 * 7)
+            print(f"            ~kuniga {remain_h / max(days_left, 0.1):.1f}h, ~soatiga {remain_h / max(days_left * 24, 0.1):.2f}h")
+
+            totals["gpu_used"] += used_h
+            totals["gpu_remaining"] += remain_h
+            totals["gpu_total"] += total_h
+        else:
+            print(f"     GPU:   ma'lumot yo'q")
+
+        if tpu_info:
+            used_h = _parse_hours(tpu_info["used"])
+            remain_h = _parse_hours(tpu_info["remaining"])
+            total_h = _parse_hours(tpu_info["total"])
+            print(f"     TPU:   Used: {used_h:.1f}h  |  Qolgan: {remain_h:.1f}h  |  Jami: {total_h:.0f}h/hafta")
+
+            totals["tpu_used"] += used_h
+            totals["tpu_remaining"] += remain_h
+            totals["tpu_total"] += total_h
+
+        if refresh_at and refresh_at != "?":
+            print(f"     🔄  Yangilanish: {refresh_at}")
+
+    # Jami xulosa
+    print(f"\n  {'='*50}")
+    print(f"  📋 JAMI (3 akkaunt):")
+    print(f"     GPU: {totals['gpu_used']:.1f}h ishlatilgan, {totals['gpu_remaining']:.1f}h qolgan ({totals['gpu_total']:.0f}h jami)")
+    print(f"     TPU: {totals['tpu_used']:.1f}h ishlatilgan, {totals['tpu_remaining']:.1f}h qolgan ({totals['tpu_total']:.0f}h jami)")
+    print()
+
+
+# =====================================================================
 # KERNEL TOZALASH (--d)
 # =====================================================================
 def _delete_all_kernels():
@@ -916,6 +1031,7 @@ def main():
             "  python3 launch_kaggle.py --node 2   # Node-2: STT (EN) + STT (UZ)\n"
             "  python3 launch_kaggle.py --all       # Barcha 3 node'ni ketma-ket push qiladi\n"
             "  python3 launch_kaggle.py -d          # Barcha akkauntdagi kernel'larni o'chirish\n"
+            "  python3 launch_kaggle.py -i          # GPU/TPU kvota ma'lumoti\n"
         ),
     )
     parser.add_argument("--node", type=int, choices=[0, 1, 2], default=0,
@@ -924,13 +1040,20 @@ def main():
                         help="Barcha 3 node'ni ketma-ket push qilish (0 → 1 → 2)")
     parser.add_argument("-d", "--delete-all", action="store_true",
                         help="Barcha 3 akkauntdagi barcha kernel'larni o'chirish")
+    parser.add_argument("-i", "--info", action="store_true",
+                        help="GPU/TPU kvota ma'lumotlarini ko'rsatish (ishlatilgan/qolgan/jami)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Faqat fayllarni generatsiya qiladi, Kaggle'ga push qilmaydi")
     args = parser.parse_args()
 
     _load_env()
 
-    # --d flag: faqat o'chirish, launch qilmaslik
+    # -i flag: kvota ma'lumoti
+    if args.info:
+        _show_quota()
+        return
+
+    # -d flag: faqat o'chirish, launch qilmaslik
     if args.delete_all:
         print("🗑️  BARCHA AKKAUNTDAGI KERNELLAR O'CHIRILMOQDA...")
         _delete_all_kernels()
