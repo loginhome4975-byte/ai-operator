@@ -75,8 +75,13 @@ def _load_env():
             key = key.strip()
             val = val.strip().strip('"').strip("'")
             os.environ[key] = val
-            if key == "KAGGLE_KEY" and val.startswith("KGAT_"):
-                os.environ["KAGGLE_API_TOKEN"] = val
+            # Har bir akkaunt uchun KAGGLE_API_TOKEN ni ham o'rnatamiz
+            if key.startswith("KAGGLE_KEY") and val.startswith("KGAT_"):
+                # KAGGLE_KEY → KAGGLE_API_TOKEN, KAGGLE_KEY_1 → KAGGLE_API_TOKEN_1, ...
+                if key == "KAGGLE_KEY":
+                    os.environ["KAGGLE_API_TOKEN"] = val
+                else:
+                    os.environ[f"KAGGLE_API_TOKEN_{key[-1]}"] = val
 
 
 def _get_kaggle_auth(node_idx: int):
@@ -106,6 +111,13 @@ def _stream_node_logs(node_idx: int, log_queue: queue.Queue, stop_event: threadi
     env = os.environ.copy()
     env["KAGGLE_USERNAME"] = user
     env["KAGGLE_KEY"] = key
+    # KAGGLE_API_TOKEN ni tozalab, joriy node'ga mosini o'rnatamiz
+    # (aks holda Node-0 tokeni hamma node uchun ishlatilib qoladi)
+    env.pop("KAGGLE_API_TOKEN", None)
+    api_token_key = "KAGGLE_API_TOKEN" if node_idx == 0 else f"KAGGLE_API_TOKEN_{node_idx}"
+    api_token = os.environ.get(api_token_key, "")
+    if api_token:
+        env["KAGGLE_API_TOKEN"] = api_token
 
     color = NODE_COLORS[node_idx]
     label = f"[Node-{node_idx}]"
