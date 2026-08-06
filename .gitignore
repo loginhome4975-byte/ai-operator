@@ -19,6 +19,10 @@ venv/
 .Python
 pip-wheel-metadata/
 
+# ---------- Node.js ----------
+node_modules/
+package-lock.json
+
 # ---------- Python cache ----------
 __pycache__/
 *.py[cod]

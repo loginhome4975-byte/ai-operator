@@ -1,0 +1,28 @@
+{
+  "name": "ai-operator",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "logs": "node scripts/log_stream.mjs",
+    "logs:0": "node scripts/log_stream.mjs --node 0",
+    "logs:1": "node scripts/log_stream.mjs --node 1",
+    "logs:2": "node scripts/log_stream.mjs --node 2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/loginhome4975-byte/ai-operator.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/loginhome4975-byte/ai-operator/issues"
+  },
+  "homepage": "https://github.com/loginhome4975-byte/ai-operator#readme",
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "dotenv": "^17.4.2"
+  }
+}
