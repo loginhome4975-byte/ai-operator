@@ -33,6 +33,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 dotenv.config({ path: resolve(__dirname, '..', '.env') });
 
+// Python _load_env kabi: KAGGLE_KEY_x → KAGGLE_API_TOKEN_x
+// (dotenv faqat .env dagi qiymatlarni o'qiydi, transformatsiya qilmaydi)
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('KAGGLE_KEY') && process.env[key].startsWith('KGAT_')) {
+    const suffix = key === 'KAGGLE_KEY' ? '' : '_' + key.slice(-1);
+    process.env['KAGGLE_API_TOKEN' + suffix] = process.env[key];
+  }
+}
+
 const NODES = {
   0: {
     label: 'Node-0 (LLM+TTS UZ)',
@@ -73,7 +82,14 @@ function makeEnv(nodeIdx) {
   const env = { ...process.env };
   env.KAGGLE_USERNAME = user;
   env.KAGGLE_KEY = key;
+  // Global KAGGLE_API_TOKEN ni tozalab, joriy node'ga mosini o'rnatamiz
+  // (aks holda Kaggle CLI faqat KAGGLE_KEY bilan ishlamaydi)
   delete env.KAGGLE_API_TOKEN;
+  const apiTokenKey = nodeIdx === 0 ? 'KAGGLE_API_TOKEN' : `KAGGLE_API_TOKEN_${nodeIdx}`;
+  const apiToken = process.env[apiTokenKey];
+  if (apiToken) {
+    env.KAGGLE_API_TOKEN = apiToken;
+  }
   return env;
 }
 
