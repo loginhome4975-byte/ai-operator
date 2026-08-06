@@ -1198,7 +1198,7 @@ def _launch_node(node: int, dry_run: bool = False):
         "is_private": "true",
         "enable_gpu": "true",
         "enable_internet": "true",
-        "machine_shape": "NvidiaTeslaT4x2",
+        "machine_shape": "NvidiaTeslaT4",
         "dataset_sources": dataset_sources,
         "competition_sources": [],
         "kernel_sources": []
@@ -1248,7 +1248,7 @@ def _launch_node(node: int, dry_run: bool = False):
         print(f"   ⚠️  Status tekshirishda xatolik (davom etilmoqda): {e}")
 
     print("Tayyor! Kagglega API orqali yuborilmoqda...")
-    subprocess.run(["kaggle", "kernels", "push", "-p", node_dir, "--accelerator", "nvidiaTeslaT4x2"])
+    subprocess.run(["kaggle", "kernels", "push", "-p", node_dir, "--accelerator", "nvidiaTeslaT4"])
     print(f"✅ {cfg['label']} Kernel yuborildi!")
 
 
