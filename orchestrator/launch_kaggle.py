@@ -863,9 +863,9 @@ def _monitor_nodes():
     print(f"  📡 NODE MONITORING")
     print(f"{'='*70}")
     
-    # URL'lar ro'yxati — avval localhost, keyin env URL
-    urls_to_try = ["http://localhost:8000"]
-    if orch_url and orch_url != "http://localhost:8000":
+    # URL'lar ro'yxati — avval localhost (8000, 8080), keyin env URL
+    urls_to_try = ["http://localhost:8000", "http://localhost:8080", "http://127.0.0.1:8080"]
+    if orch_url and orch_url not in urls_to_try:
         urls_to_try.append(orch_url)
     
     # 1. Orchestrator orqali urinib ko'rish
