@@ -712,31 +712,10 @@ os.system(f"/kaggle/working/venv/bin/python /kaggle/working/main_app.py")
 # =====================================================================
 # MAIN
 # =====================================================================
-def main():
-    parser = argparse.ArgumentParser(
-        description="Yagona Kaggle node launch skripti (Node-0/1/2).",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Misollar:\n"
-            "  python3 launch_kaggle.py            # Node-0: LLM + TTS (UZ)\n"
-            "  python3 launch_kaggle.py --node 1   # Node-1: STT (RU) + TTS (RU/EN)\n"
-            "  python3 launch_kaggle.py --node 2   # Node-2: STT (EN) + STT (UZ)\n"
-        ),
-    )
-    parser.add_argument("--node", type=int, choices=[0, 1, 2], default=0,
-                        help="Qaysi node'ni ishga tushirish (default: 0)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Faqat fayllarni generatsiya qiladi, Kaggle'ga push qilmaydi")
-    args = parser.parse_args()
-
-    _load_env()
-    cfg = NODE_CONFIGS[args.node]
-    kaggle_user, kaggle_api_token = _resolve_account(args.node)
-
-    aes_256_key = os.environ.get("AES_256_KEY", "")
-    if not aes_256_key:
-        print("XATO: .env faylida AES_256_KEY topilmadi!")
-        sys.exit(1)
+def _launch_node(node: int, dry_run: bool = False):
+    """Bitta node'ni generatsiya qilish + push qilish."""
+    cfg = NODE_CONFIGS[node]
+    kaggle_user, kaggle_api_token = _resolve_account(node)
 
     node_dir = cfg["node_dir"]
     os.makedirs(node_dir, exist_ok=True)
@@ -754,6 +733,10 @@ def main():
     stored_hash = os.environ.get(f"{env_prefix}_VENV_HASH", "")
     stored_path = os.environ.get(f"{env_prefix}_DATASET_PATH", "")
     deltadata = (stored_hash != code_hash) if stored_hash else True
+
+    print(f"\n{'='*60}")
+    print(f"  {cfg['label']}: {kaggle_user}/{cfg['kernel_suffix']}")
+    print(f"{'='*60}")
 
     if deltadata:
         print(f"🔄 DELTA ANIQLANDI! (eski={stored_hash[:8] if stored_hash else 'yoq'}, yangi={code_hash[:8]})")
@@ -792,7 +775,7 @@ def main():
     with open(os.path.join(node_dir, "kernel-metadata.json"), "w") as f:
         f.write(metadata)
 
-    if args.dry_run:
+    if dry_run:
         with open(os.path.join(node_dir, "main_app.py"), "w") as f:
             f.write(main_app_code)
         print(f"[DRY-RUN] {node_dir}/ fayllari yaratildi — Kaggle'ga push qilinmadi.")
@@ -835,7 +818,48 @@ def main():
 
     print("Tayyor! Kagglega API orqali yuborilmoqda...")
     subprocess.run(["kaggle", "kernels", "push", "-p", node_dir])
-    print(f"{cfg['label']} Kernel yuborildi!")
+    print(f"✅ {cfg['label']} Kernel yuborildi!")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Yagona Kaggle node launch skripti (Node-0/1/2).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Misollar:\n"
+            "  python3 launch_kaggle.py            # Node-0: LLM + TTS (UZ)\n"
+            "  python3 launch_kaggle.py --node 1   # Node-1: STT (RU) + TTS (RU/EN)\n"
+            "  python3 launch_kaggle.py --node 2   # Node-2: STT (EN) + STT (UZ)\n"
+            "  python3 launch_kaggle.py --all       # Barcha 3 node'ni ketma-ket push qiladi\n"
+        ),
+    )
+    parser.add_argument("--node", type=int, choices=[0, 1, 2], default=0,
+                        help="Qaysi node'ni ishga tushirish (default: 0)")
+    parser.add_argument("--all", action="store_true",
+                        help="Barcha 3 node'ni ketma-ket push qilish (0 → 1 → 2)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Faqat fayllarni generatsiya qiladi, Kaggle'ga push qilmaydi")
+    args = parser.parse_args()
+
+    _load_env()
+
+    aes_256_key = os.environ.get("AES_256_KEY", "")
+    if not aes_256_key:
+        print("XATO: .env faylida AES_256_KEY topilmadi!")
+        sys.exit(1)
+
+    if args.all:
+        nodes = [0, 1, 2]
+        print(f"\n🚀 BARCHA 3 NODE LAUNCH QILINMOQDA...")
+    else:
+        nodes = [args.node]
+
+    for node in nodes:
+        _launch_node(node, dry_run=args.dry_run)
+
+    if args.all:
+        print(f"\n🎉 Barcha 3 node launch qilindi!")
+        print(f"   Log'larni kuzatish: python3 scripts/log_stream.py --node all")
 
 
 if __name__ == "__main__":
