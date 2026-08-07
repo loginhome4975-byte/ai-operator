@@ -184,7 +184,7 @@ def keep_registering(url):
 
 threading.Thread(target=keep_registering, args=(public_url,), daemon=True).start()
 
-HF_TOKEN = "PLACEHOLDER"
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 if not HF_TOKEN:
     log.warning("HF_TOKEN o'rnatilmagan")
 else:

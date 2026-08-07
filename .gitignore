@@ -132,15 +132,19 @@ builder/models/.cache/
 .cache/huggingface/
 
 # ------------------------------------------------------------------
-# KAGGLE NODE LOKAL NUSXALAR (launch script'lar yaratadi, eskirgan)
+# KAGGLE NODE LOKAL NUSXALAR (launch_kaggle.py generatsiya qiladi)
+# ⚠️ Ular generatsiya paytida .env'dan HF_TOKEN kabi maxfiy qiymatlarni
+#    ichiga yozadi — hech qachon commit qilinmasin! (path'lar to'g'rilandi)
 # ------------------------------------------------------------------
-kaggle_node/run_server.py
-kaggle_node/main_app.py
-kaggle_node/kernel-metadata.json
-kaggle_node_1/run_server.py
-kaggle_node_1/kernel-metadata.json
-kaggle_node_2/run_server.py
-kaggle_node_2/kernel-metadata.json
+orchestrator/kaggle_node/run_server.py
+orchestrator/kaggle_node/main_app.py
+orchestrator/kaggle_node/kernel-metadata.json
+orchestrator/kaggle_node_1/run_server.py
+orchestrator/kaggle_node_1/main_app.py
+orchestrator/kaggle_node_1/kernel-metadata.json
+orchestrator/kaggle_node_2/run_server.py
+orchestrator/kaggle_node_2/main_app.py
+orchestrator/kaggle_node_2/kernel-metadata.json
 
 # ------------------------------------------------------------------
 # BINARY TOOLS

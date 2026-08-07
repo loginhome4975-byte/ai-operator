@@ -187,7 +187,9 @@ threading.Thread(target=keep_registering, args=(public_url,), daemon=True).start
 log.info("Modellar yuklanmoqda...")
 
 from huggingface_hub import login
-login(token="PLACEHOLDER")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+if HF_TOKEN:
+    login(token=HF_TOKEN)
 import torch
 
 # --- GPU aniqlash ---

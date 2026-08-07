@@ -158,7 +158,8 @@ redis-server    : active
 └── .github/workflows/ci.yml
 ```
 
-> ⚠️ **Gitignore eslatmasi:** `orchestrator/kaggle_node*/run_server.py` va `kernel-metadata.json` git'da YO'Q — ular `launch_kaggle.py` tomonidan generatsiya qilinadi (asosiy manba `launch_kaggle.py` ichidagi template'lar). Hozirgi generatsiya qilingan nusxalar **backup arxivda** to'liq saqlangan.
+> ⚠️ **Gitignore eslatmasi:** `orchestrator/kaggle_node*/run_server.py`, `main_app.py`, `kernel-metadata.json` — `launch_kaggle.py` tomonidan generatsiya qilinadigan fayllar (asosiy manba `launch_kaggle.py` ichidagi template'lar).
+> 🔒 **XAVFSIZLIK:** Bu fayllar generatsiya paytida `.env` dan `HF_TOKEN` kabi maxfiy qiymatlarni ichiga yozadi — **commit qilinmasligi shart** (gitignore'ga kiritilgan). Hozirgi to'liq nusxalar **backup arxivda** saqlangan. Qayta generatsiyadan keyin git status'da ko'rinsa, commit qilmang.
 
 ---
 
