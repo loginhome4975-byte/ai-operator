@@ -54,6 +54,9 @@ NODE_CONFIGS = {
             "/kaggle/working/venv/bin/pip install fastapi uvicorn nest-asyncio cryptography requests soundfile huggingface_hub",
             "/kaggle/working/venv/bin/pip install -U qwen-tts",
             "/kaggle/working/venv/bin/pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121 --no-cache-dir",
+            # P100 (sm_60) va T4 (sm_75) ikkalasi bilan ishlaydigan torch — qwen-tts ning
+            # default cu130 torch'ini almashtiradi (cu130 P100 ni qo'llamaydi!)
+            "/kaggle/working/venv/bin/pip install torch==2.4.1+cu121 torchaudio==2.4.1+cu121 --index-url https://download.pytorch.org/whl/cu121",
         ],
         "extra_dataset_sources": ["bunyodbek7/miyya-qwen-7b"],
     },
@@ -77,8 +80,13 @@ NODE_CONFIGS = {
         "apt_packages": "tzdata python3.10 python3.10-venv python3.10-dev build-essential",
         "pip_commands": [
             "/kaggle/working/venv/bin/pip install --upgrade pip",
-            "/kaggle/working/venv/bin/pip install fastapi uvicorn pydantic python-multipart transformers torch torchaudio librosa soundfile accelerate nest-asyncio requests cryptography",
-            "/kaggle/working/venv/bin/pip install chatterbox-tts torchaudio",
+            "/kaggle/working/venv/bin/pip install fastapi uvicorn pydantic python-multipart transformers librosa soundfile accelerate nest-asyncio requests cryptography",
+            # Node-1: chatterbox-tts torch==2.6.0 talab qiladi — cu126 (P100 sm_60 + T4 sm_75 ishlaydi)
+            "/kaggle/working/venv/bin/pip install torch==2.6.0+cu126 torchaudio==2.6.0+cu126 --index-url https://download.pytorch.org/whl/cu126",
+            # setuptools kerak: perth (watermarker) pkg_resources/resource_filename ishlatadi —
+            # bo'lmasa PerthImplicitWatermarker=None bo'lib 'NoneType' not callable xato chiqadi
+            "/kaggle/working/venv/bin/pip install setuptools",
+            "/kaggle/working/venv/bin/pip install chatterbox-tts",
         ],
         "extra_dataset_sources": [],
     },
@@ -99,8 +107,11 @@ NODE_CONFIGS = {
         "apt_packages": "tzdata python3.10 python3.10-venv python3.10-dev build-essential",
         "pip_commands": [
             "/kaggle/working/venv/bin/pip install --upgrade pip",
-            "/kaggle/working/venv/bin/pip install fastapi uvicorn pydantic python-multipart transformers torch torchaudio librosa soundfile accelerate nest-asyncio requests cryptography",
+            "/kaggle/working/venv/bin/pip install fastapi uvicorn pydantic python-multipart transformers librosa soundfile accelerate nest-asyncio requests cryptography",
+            # P100 (sm_60) va T4 (sm_75) ikkalasi bilan ishlaydigan torch
+            "/kaggle/working/venv/bin/pip install torch==2.4.1+cu121 torchaudio==2.4.1+cu121 --index-url https://download.pytorch.org/whl/cu121",
             "/kaggle/working/venv/bin/pip install 'nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git'",
+            "/kaggle/working/venv/bin/pip install peft",
         ],
         "extra_dataset_sources": [],
     },
@@ -183,6 +194,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(log_path)]
 )
 log = logging.getLogger("{logger_name}")
+# Chet kutubxonalarning keraksiz log'larini o'chirish
+for _lib in ["huggingface_hub", "transformers", "urllib3", "filelock", "httpcore", "httpx"]:
+    logging.getLogger(_lib).setLevel(logging.WARNING)
 '''
     else:
         log_block = f'''logging.basicConfig(
@@ -191,6 +205,9 @@ log = logging.getLogger("{logger_name}")
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 log = logging.getLogger("{logger_name}")
+# Chet kutubxonalarning keraksiz log'larini o'chirish
+for _lib in ["huggingface_hub", "transformers", "urllib3", "filelock", "httpcore", "httpx"]:
+    logging.getLogger(_lib).setLevel(logging.WARNING)
 '''
 
     if cfg["hf_conditional"]:
@@ -213,7 +230,7 @@ login(token="{hf_token}")
     with open(security_path, "r") as f:
         security_code = f.read()
 
-    return f'''import os, sys, json, time, re, base64, threading, logging
+    return f'''import os, sys, json, time, re, base64, threading, logging, subprocess, uuid
 import requests
 import nest_asyncio
 import uvicorn
@@ -230,9 +247,16 @@ ORCHESTRATOR_URL = "{orch_url}"
 NODE_TYPE = "{node_type}"
 NODE_PORT = {node_port}
 
-log.info("Cloudflare tunnel ochilmoqda...")
-os.system("wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared && chmod +x cloudflared")
-os.system(f"./cloudflared tunnel --url http://127.0.0.1:{{NODE_PORT}} > cloudflared.log 2>&1 &")
+# Keraksiz log spam'ni bosish: tqdm progress bar + transformers + uvicorn health
+os.environ["TQDM_DISABLE"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+logging.getLogger("uvicorn.access").addFilter(lambda r: "/health" not in r.getMessage())
+
+log.info("Tunnel ochilmoqda...")
+# cloudflared allaqachon mavjud bo'lsa qayta yuklanmaydi
+if not os.path.exists("./cloudflared"):
+    subprocess.run("wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared && chmod +x cloudflared", shell=True, capture_output=True)
+subprocess.Popen(["./cloudflared", "tunnel", "--url", f"http://127.0.0.1:{{NODE_PORT}}"], stdout=open("cloudflared.log", "w"), stderr=subprocess.STDOUT)
 
 public_url = None
 for _ in range(30):
@@ -244,24 +268,35 @@ for _ in range(30):
                 public_url = m.group(0)
                 break
 if not public_url:
-    log.error("Cloudflared URL topilmadi!")
-    os.system("cat cloudflared.log")
+    log.error("Tunnel URL topilmadi! cloudflared.log:")
+    with open("cloudflared.log") as f:
+        log.error(f.read()[-500:])
     sys.exit(1)
-log.info(f"Tunnel URL: {{public_url}}")
+log.info(f"Tunnel: {{public_url}}")
 
 def keep_registering(url):
-    attempt = 0
+    """Orchestrator'ga doimiy registratsiya — har 60 soniyada.
+    Orchestrator restart bo'lsa ham node URL'i qayta yuboriladi
+    (register-node 'URL o'zgarmasa skip' qiladi, spam bo'lmaydi).
+    Log: faqat birinchi va har 15-muvaffaqiyatda chiqadi."""
+    ok_count = 0
     while True:
         try:
             _nk = "{node_comm_key}"
             headers = {{"X-API-Key": _nk}}
             r = requests.post(f"{{ORCHESTRATOR_URL}}/register-node",
                 json={{"node_type": NODE_TYPE, "url": url}}, headers=headers, timeout=10)
-            log.info(f"Register #{{attempt+1}}: {{r.status_code}} {{r.text[:80]}}")
+            if r.status_code == 200:
+                ok_count += 1
+                if ok_count == 1 or ok_count % 15 == 0:
+                    log.info(f"✅ Orchestrator bilan aloqa OK (№{{ok_count}})")
+            else:
+                ok_count = 0
+                log.warning(f"Register: HTTP {{r.status_code}}")
         except Exception as e:
-            log.warning(f"Register xatosi: {{e}}")
-        attempt += 1
-        time.sleep(2 if attempt < 5 else 60)
+            ok_count = 0
+            log.warning(f"Register: {{e}}")
+        time.sleep(60)
 
 threading.Thread(target=keep_registering, args=(public_url,), daemon=True).start()
 
@@ -311,7 +346,8 @@ log.info("Barcha modellar tayyor!")
 app = FastAPI(title="Node-0: LLM + UZ TTS")
 
 class EncryptedRequest(BaseModel):
-    encrypted_payload: str
+    encrypted_payload: str = ""
+    encrypted_text: str = ""
 
 @app.get("/health")
 async def health():
@@ -337,13 +373,27 @@ async def get_logs():
 @app.post("/chat")
 async def chat(req: EncryptedRequest):
     data = json.loads(decrypt_payload(req.encrypted_payload).decode('utf-8'))
-    resp = llm.create_chat_completion(messages=data.get("messages", []), max_tokens=512)
-    text = resp["choices"][0]["message"]["content"]
-    return {"encrypted_payload": encrypt_payload(json.dumps({"response": text}).encode('utf-8'))}
+    msgs = data.get("messages", [])
+    tools = data.get("tools") or None
+    llm_cfg = data.get("llm") or {}
+    kwargs = {"messages": msgs}
+    kwargs["max_tokens"] = int(llm_cfg.get("max_tokens", 512))
+    if llm_cfg.get("temperature") is not None:
+        kwargs["temperature"] = float(llm_cfg["temperature"])
+    if tools:
+        kwargs["tools"] = tools   # audit fix: tool_calls qaytishi uchun shart!
+    resp = llm.create_chat_completion(**kwargs)
+    msg = resp["choices"][0]["message"]
+    out = {"response": (msg.get("content") or "").strip()}
+    if msg.get("tool_calls"):
+        out["tool_calls"] = msg["tool_calls"]
+    return {"encrypted_payload": encrypt_payload(json.dumps(out).encode('utf-8'))}
 
 @app.post("/synthesize")
 async def synthesize(req: EncryptedRequest):
-    data = json.loads(decrypt_payload(req.encrypted_payload).decode('utf-8'))
+    # Audit fix: orchestrator endi `encrypted_text` yuboradi (eski kalit ham qabul qilinadi)
+    raw = req.encrypted_text or req.encrypted_payload
+    data = json.loads(decrypt_payload(raw).decode('utf-8'))
     text = (data.get("text") or "").strip()
     if hasattr(tts, "generate_custom_voice"):
         audio_data, sr = tts.generate_custom_voice(text=text, language=_lang, speaker=_speaker)
@@ -352,8 +402,10 @@ async def synthesize(req: EncryptedRequest):
     else:
         raise HTTPException(500, f"TTS method topilmadi: {dir(tts)}")
     audio = audio_data[0] if isinstance(audio_data, list) else audio_data
-    path = f"/tmp/tts_{time.time()}.wav"
+    # Audit fix: uuid nom + fayl 120s dan keyin tozalanadi (disk to'lib ketmasin)
+    path = f"/tmp/tts_{uuid.uuid4().hex[:10]}.wav"
     sf.write(path, audio, samplerate=24000)
+    threading.Timer(120.0, lambda: os.path.exists(path) and os.remove(path)).start()
     return FileResponse(path, media_type="audio/wav")
 
 nest_asyncio.apply()
@@ -387,9 +439,15 @@ stt_pipe = pipeline("automatic-speech-recognition", model=stt_model,
 log.info(f"[2/2] Chatterbox Multilingual TTS RU/EN ({dev_tts})...")
 try:
     import torchaudio as ta
+    import perth
+    # perth watermarker import buzilsa (pkg_resources/setuptools muammosi)
+    # PerthImplicitWatermarker None bo'lib qoladi — DummyWatermarker bilan almashtiramiz,
+    # shunda Chatterbox qanday holatda ham yuklanadi.
+    if getattr(perth, "PerthImplicitWatermarker", None) is None:
+        perth.PerthImplicitWatermarker = perth.DummyWatermarker
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-    tts_pipe = ChatterboxMultilingualTTS.from_pretrained(device=dev_tts, t3_model="v3")
-    _speaker = None
+    # from_pretrained faqat 'device' parametrini qabul qiladi (t3_model YO'Q!)
+    tts_pipe = ChatterboxMultilingualTTS.from_pretrained(device=dev_tts)
 except Exception as e:
     log.warning(f"Chatterbox TTS yuklanmadi: {e}")
     tts_pipe = None
@@ -422,11 +480,17 @@ async def health():
 @app.post("/transcribe/ru")
 async def transcribe_ru(req: STTRequest):
     audio_bytes = decrypt_payload(req.encrypted_audio)
-    path = f"/tmp/ru_{int(time.time())}.wav"
-    with open(path, "wb") as f:
-        f.write(audio_bytes)
-    result = stt_pipe(path, generate_kwargs={"language": "russian"})
-    return {"encrypted_text": encrypt_payload(result["text"].encode('utf-8'))}
+    # Audit fix: uuid nom (collision bo'lmasin) + ishlatilgach o'chirish
+    path = f"/tmp/ru_{uuid.uuid4().hex[:10]}.wav"
+    try:
+        with open(path, "wb") as f:
+            f.write(audio_bytes)
+        result = stt_pipe(path, generate_kwargs={"language": "russian"})
+        return {"encrypted_text": encrypt_payload(result["text"].encode('utf-8'))}
+    finally:
+        if os.path.exists(path):
+            try: os.remove(path)
+            except Exception: pass
 
 @app.post("/synthesize/ru")
 async def synthesize_ru(req: TTSRequest):
@@ -443,8 +507,10 @@ async def _synthesize(req: TTSRequest, lang: str):
     try:
         lang_id = "ru" if lang == "ru" else "en"
         wav = tts_pipe.generate(text, language_id=lang_id)
-        path = f"/tmp/tts_{lang}_{int(time.time())}.wav"
+        # Audit fix: uuid nom + 120s dan keyin tozalash
+        path = f"/tmp/tts_{lang}_{uuid.uuid4().hex[:10]}.wav"
         ta.save(path, wav, tts_pipe.sr)
+        threading.Timer(120.0, lambda: os.path.exists(path) and os.remove(path)).start()
         return FileResponse(path, media_type="audio/wav")
     except Exception as e:
         log.error(f"TTS {lang}: {e}")
@@ -457,7 +523,20 @@ uvicorn.run(app, host="0.0.0.0", port=NODE_PORT)
 
 def _node2_body():
     """Node-2: Canary-Qwen 2.5B (EN STT) + Kotib (UZ STT)."""
-    return '''import torch, traceback
+    return '''# ── NCCL moslik fix ──
+# `undefined symbol: ncclCommResume` xatosi: torch'ning libtorch_cuda.so si yangi
+# libnccl talab qiladi, lekin Kaggle base image'ning eski libnccl.so.2 birinchi
+# yuklanadi. Yechim: venv ichidagi (torch/nvidia bilan kelgan) liblarni
+# LD_LIBRARY_PATH'ga birinchi qo'yish — base image'ning eski libi shadow bo'lmaydi.
+import glob as _glob
+_nv_dirs = _glob.glob("/kaggle/working/venv/lib/python3.10/site-packages/nvidia/*/lib")
+_torch_lib = "/kaggle/working/venv/lib/python3.10/site-packages/torch/lib"
+_cand = [d for d in [_torch_lib] + _nv_dirs if os.path.isdir(d)]
+if _cand:
+    _old_ld = os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = ":".join(_cand) + ((":" + _old_ld) if _old_ld else "")
+
+import torch, traceback
 from transformers import pipeline
 
 # --- GPU aniqlash ---
@@ -526,10 +605,11 @@ async def transcribe_en(req: STTRequest):
     if not en_model:
         raise HTTPException(503, "EN STT yuklanmagan")
     audio_bytes = decrypt_payload(req.encrypted_audio)
-    path = f"/tmp/en_{int(time.time())}.wav"
-    with open(path, "wb") as f:
-        f.write(audio_bytes)
+    # Audit fix: uuid nom + tozalash
+    path = f"/tmp/en_{uuid.uuid4().hex[:10]}.wav"
     try:
+        with open(path, "wb") as f:
+            f.write(audio_bytes)
         answer_ids = en_model.generate(
             prompts=[[{"role": "user", "content": f"Transcribe the following: {en_model.audio_locator_tag}", "audio": [path]}]],
             max_new_tokens=128,
@@ -539,17 +619,27 @@ async def transcribe_en(req: STTRequest):
     except Exception as e:
         log.error(f"Canary-Qwen transcribe: {e}")
         raise HTTPException(500, str(e))
+    finally:
+        if os.path.exists(path):
+            try: os.remove(path)
+            except Exception: pass
 
 @app.post("/transcribe/uz")
 async def transcribe_uz(req: STTRequest):
     if not uz_pipe:
         raise HTTPException(503, "UZ STT yuklanmagan")
     audio_bytes = decrypt_payload(req.encrypted_audio)
-    path = f"/tmp/uz_{int(time.time())}.wav"
-    with open(path, "wb") as f:
-        f.write(audio_bytes)
-    result = uz_pipe(path)
-    return {"encrypted_text": encrypt_payload(result["text"].encode('utf-8'))}
+    # Audit fix: uuid nom + tozalash
+    path = f"/tmp/uz_{uuid.uuid4().hex[:10]}.wav"
+    try:
+        with open(path, "wb") as f:
+            f.write(audio_bytes)
+        result = uz_pipe(path)
+        return {"encrypted_text": encrypt_payload(result["text"].encode('utf-8'))}
+    finally:
+        if os.path.exists(path):
+            try: os.remove(path)
+            except Exception: pass
 
 @app.get("/logs")
 async def get_logs():
@@ -580,28 +670,43 @@ def _build_runner_code(cfg, encoded_main):
 
     return f'''import os, sys, subprocess, base64
 
-print("{node_label} initialization starting...")
+# ── Bosqichli log uchun yordamchi ──
+def _run(cmd, desc=""):
+    """Buyruqni ishga tushiradi, faqat natijani ko'rsatadi."""
+    label = f"  {{desc}}: " if desc else ""
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=600)
+        if r.returncode == 0:
+            print(f"{{label}}✅")
+        else:
+            err = (r.stderr or r.stdout or "").strip()
+            print(f"{{label}}❌ XATO (exit={{r.returncode}})")
+            if err:
+                print(f"     {{err[-300:]}}")
+    except Exception as e:
+        print(f"{{label}}❌ {{e}}")
+
+print("=" * 50)
+print(f"  {{'{node_label}'}} — ishga tushirilmoqda")
+print("=" * 50)
 
 encoded_main = "{encoded_main}"
 with open("/kaggle/working/main_app.py", "w") as f:
     f.write(base64.b64decode(encoded_main).decode('utf-8'))
 
-print("Python 3.10 + venv qurilmoqda...")
-os.system("DEBIAN_FRONTEND=noninteractive apt-get update -y")
-os.system(f"DEBIAN_FRONTEND=noninteractive apt-get install {apt_packages} -y")
-os.system("python3.10 -m venv /kaggle/working/venv")
+print("📦 Tizim paketlari...")
+_run("DEBIAN_FRONTEND=noninteractive apt-get update -y -qq", "apt update")
+_run(f"DEBIAN_FRONTEND=noninteractive apt-get install {apt_packages} -y -qq", "apt install")
+_run("python3.10 -m venv /kaggle/working/venv", "venv yaratish")
 
-print("Kutubxonalar venv ichiga o'rnatilmoqda...")
+print("📦 Python kutubxonalari...")
 pip_cmds = [
     {pip_commands_str}
 ]
-for cmd in pip_cmds:
-    print(f"  $ {{cmd}}")
-    ret = os.system(cmd)
-    if ret != 0:
-        print(f"  Pip buyrug'i xato (exit={{ret}})")
+for i, cmd in enumerate(pip_cmds, 1):
+    _run(cmd + " -q", f"pip {{i}}/{{len(pip_cmds)}}")
 
-print("Server ishga tushirilmoqda...")
+print("🚀 Server ishga tushirilmoqda...")
 os.system(f"/kaggle/working/venv/bin/python /kaggle/working/main_app.py")
 '''
 
@@ -729,45 +834,47 @@ def _monitor_nodes():
     import urllib.request
     import urllib.error
     
-    orch_url = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8000")
+    orch_url = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8080")
     api_key = os.environ.get("ORCHESTRATOR_API_KEY", "")
     
     print(f"\n{'='*70}")
     print(f"  📡 NODE MONITORING")
     print(f"{'='*70}")
     
-    # URL'lar ro'yxati — avval localhost (8000, 8080), keyin env URL
-    urls_to_try = ["http://localhost:8000", "http://localhost:8080", "http://127.0.0.1:8080"]
+    # URL'lar ro'yxati — 8080 asosiy port
+    urls_to_try = ["http://localhost:8080", "http://127.0.0.1:8080"]
     if orch_url and orch_url not in urls_to_try:
         urls_to_try.append(orch_url)
     
     # 1. Orchestrator orqali urinib ko'rish
-    if api_key:
-        for url in urls_to_try:
-            try:
-                full_url = f"{url}/api/nodes/status"
-                req = urllib.request.Request(
-                    full_url,
-                    headers={"X-API-Key": api_key}
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode())
-                    nodes_data = data.get("nodes", {})
-                    
-                    if nodes_data:
-                        print(f"  ✅ Manba: {url}")
-                        _display_nodes_from_orchestrator(nodes_data)
-                        return
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    print(f"  ⚠️  {url} — endpoint topilmadi (orchestrator'ni restart qiling)")
-                else:
-                    print(f"  ⚠️  {url} — HTTP {e.code}")
-            except Exception as e:
-                print(f"  ⚠️  {url} — ulanmadi: {e}")
-        print(f"  Kaggle CLI orqali tekshirilmoqda...\n")
+    found_orch = False
+    for url in urls_to_try:
+        full_url = f"{url}/api/nodes/status"
+        headers = {"X-API-Key": api_key} if api_key else {}
+        try:
+            req = urllib.request.Request(full_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+                nodes_data = data.get("nodes", {})
+                found_orch = True
+                print(f"  🔗 Orchestrator: {url}")
+                _display_nodes_from_orchestrator(nodes_data)
+                return
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                print(f"  ⚠️  {url} — API kalit kerak (.env da ORCHESTRATOR_API_KEY)")
+                found_orch = True
+                break
+            elif e.code == 404:
+                print(f"  ⚠️  {url} — endpoint yo'q (orchestrator eski versiya)")
+            else:
+                print(f"  ⚠️  {url} — HTTP {e.code}")
+        except Exception as e:
+            print(f"  ⚠️  {url} — ulanmadi ({e})")
     
     # 2. Fallback: Kaggle CLI
+    if not found_orch:
+        print(f"\n  Orchestrator topilmadi, Kaggle CLI orqali tekshirilmoqda...")
     _monitor_via_kaggle_cli()
 
 
@@ -1011,7 +1118,7 @@ def _launch_node(node: int, dry_run: bool = False):
         "is_private": "true",
         "enable_gpu": "true",
         "enable_internet": "true",
-        "machine_shape": "NvidiaTeslaT4",
+        "machine_shape": "NvidiaTeslaT4x2",
         "dataset_sources": dataset_sources,
         "competition_sources": [],
         "kernel_sources": []
@@ -1060,7 +1167,7 @@ def _launch_node(node: int, dry_run: bool = False):
         print(f"   ⚠️  Status tekshirishda xatolik (davom etilmoqda): {e}")
 
     print("Tayyor! Kagglega API orqali yuborilmoqda...")
-    subprocess.run(["kaggle", "kernels", "push", "-p", node_dir, "--accelerator", "nvidiaTeslaT4"])
+    subprocess.run(["kaggle", "kernels", "push", "-p", node_dir, "--accelerator", "nvidiaTeslaT4x2"])
     print(f"✅ {cfg['label']} Kernel yuborildi!")
 
 

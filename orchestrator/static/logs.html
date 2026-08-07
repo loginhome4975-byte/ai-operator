@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kaggle Node Loglar</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #1a1b26; --surface: #24283b; --border: #414868;
+  --text: #c0caf5; --text2: #a9b1d6; --text3: #565f89;
+  --n0: #9ece6a; --n0bg: rgba(158,206,106,.08);
+  --n1: #7dcfff; --n1bg: rgba(125,207,255,.08);
+  --n2: #bb9af7; --n2bg: rgba(187,154,247,.08);
+  --n3: #e0af68; --n3bg: rgba(224,175,104,.08);
+  --radius: 20px;
+  --shadow: 0 2px 8px rgba(0,0,0,.25);
+  --shadow-lg: 0 6px 20px rgba(0,0,0,.35);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  height: 100vh;      /* fallback: eski brauzerlar */
+  height: 100dvh;     /* dynamic viewport — brauzer tab-bar/bookmark-bar hisobga olinadi,
+                         aks holda 100vh ekrandan katta bo'lib topbar kesilib qoladi */
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ─── TOPBAR ─── */
+.topbar {
+  background: var(--surface);
+  padding: 14px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  z-index: 30;
+  flex-shrink: 0;
+  position: sticky; top: 0;  /* scroll bo'lsa ham sarlavha qatori doim ko'rinadi */
+}
+.topbar-left { display: flex; align-items: center; gap: 12px; }
+.topbar-left .logo { font-size: 22px; }
+.topbar-left h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+.topbar-right { display: flex; align-items: center; gap: 20px; }
+.clock {
+  font-size: 13px; color: #7dcfff; font-weight: 500;
+  font-family: 'JetBrains Mono', monospace;
+  background: #1f2335; padding: 6px 14px;
+  border-radius: 20px; border: 1px solid var(--border);
+}
+.status-dots { display: flex; gap: 16px; }
+.status-item {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12px; font-weight: 600; color: var(--text2);
+}
+.pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block; animation: pulse 2s infinite;
+}
+.pulse.green  { background: var(--n0); box-shadow: 0 0 8px var(--n0); }
+.pulse.cyan   { background: var(--n1); box-shadow: 0 0 8px var(--n1); }
+.pulse.purple { background: var(--n2); box-shadow: 0 0 8px var(--n2); }
+.pulse.off    { background: #565f89; animation: none; box-shadow: none; }
+.pulse.amber  { background: var(--n3); box-shadow: 0 0 8px var(--n3); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+.btn {
+  background: #363b54; color: var(--text);
+  border: 1px solid var(--border); padding: 8px 18px;
+  border-radius: 10px; cursor: pointer; font-size: 13px;
+  font-weight: 600; display: flex; align-items: center; gap: 7px;
+  box-shadow: var(--shadow); transition: all 0.2s;
+}
+.btn:hover {
+  background: #414868; border-color: #565f89;
+  transform: translateY(-1px); box-shadow: var(--shadow-lg);
+}
+.btn-danger { border-color: rgba(247,118,142,.35); color: #f7768e; }
+.btn-danger:hover {
+  background: rgba(247,118,142,.12); border-color: #f7768e;
+  color: #f7768e;
+}
+.btn-danger.cleared {
+  background: rgba(158,206,106,.12); border-color: var(--n0); color: var(--n0);
+}
+
+/* ─── ACTION BAR (launch_kaggle.py tugmalari) ─── */
+.action-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 28px;
+  background: #1f2335;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.action-bar .ab-label {
+  font-size: 11px; font-weight: 600; color: var(--text3);
+  text-transform: uppercase; letter-spacing: .8px; margin-right: 4px;
+}
+.abtn {
+  background: #2f3549; color: var(--text2);
+  border: 1px solid var(--border); padding: 6px 14px;
+  border-radius: 9px; cursor: pointer; font-size: 12px;
+  font-weight: 600; display: flex; align-items: center; gap: 6px;
+  transition: all 0.2s;
+}
+.abtn:hover { background: #414868; color: var(--text); transform: translateY(-1px); }
+.abtn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+.abtn .spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--text);
+  animation: spin .7s linear infinite; display: none;
+}
+.abtn.busy .spinner { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.abtn.danger:hover { background: #4a3038; color: #f7768e; border-color: #f7768e; }
+
+/* ─── MODAL ─── */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(10,11,20,.78);
+  display: none; align-items: center; justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(3px);
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  width: min(880px, 96vw); max-height: 84vh;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column; overflow: hidden;
+  animation: modalIn .25s ease;
+}
+@keyframes modalIn { from { opacity: 0; transform: translateY(14px) scale(.98); } to { opacity: 1; transform: none; } }
+.modal-head {
+  padding: 16px 22px; display: flex; justify-content: space-between; align-items: center;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.modal-head .modal-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.modal-head .modal-sub { font-size: 11px; color: var(--text3); font-family: 'JetBrains Mono', monospace; margin-top: 2px; }
+.modal-body {
+  flex: 1; overflow-y: auto; padding: 18px 22px; min-height: 200px;
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.7;
+  color: var(--text2); white-space: pre-wrap; word-break: break-all;
+}
+.modal-body .ph { color: var(--text3); font-style: italic; font-family: 'Inter', sans-serif; font-size: 13px; }
+.modal-foot {
+  padding: 12px 22px; display: flex; justify-content: space-between; align-items: center;
+  border-top: 1px solid var(--border); flex-shrink: 0;
+}
+.modal-status { font-size: 12px; font-weight: 600; }
+.modal-status.ok { color: var(--n0); }
+.modal-status.err { color: #f7768e; }
+.modal-status.run { color: #e0af68; }
+
+/* ─── GRID ─── */
+/* minmax(0, 1fr): qator kontent kattaligiga qarab o'sib keta olmaydi —
+   aks holda uzun loglar 3-qatorni (Node-2) konteynerdan tashqariga surib,
+   pastki qismi kesilib qolardi. Endi har qator teng bo'linadi, log-box o'zida scroll qiladi. */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  flex: 1;
+  gap: 12px;
+  padding: 12px 16px 16px 16px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ─── CARDS ─── */
+.card {
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  transition: box-shadow 0.2s;
+  min-height: 0;
+}
+.card:hover { box-shadow: var(--shadow-lg); }
+.card-head {
+  padding: 14px 18px;
+  display: flex; justify-content: space-between; align-items: center;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.card-head .node-label { font-size: 14px; font-weight: 700; letter-spacing: -0.2px; }
+.card-head .node-meta  { font-size: 11px; color: var(--text2); font-weight: 500; font-family: 'JetBrains Mono', monospace; }
+.card-actions { display: flex; align-items: center; gap: 10px; }
+.copy-btn {
+  background: #2f3549; color: var(--text2);
+  border: 1px solid var(--border); width: 30px; height: 30px;
+  border-radius: 8px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s;
+}
+.copy-btn:hover {
+  background: #414868; color: var(--text);
+  transform: translateY(-1px); box-shadow: var(--shadow);
+}
+.copy-btn.copied {
+  color: var(--n0); border-color: var(--n0); background: var(--n0bg);
+}
+.card-n0 .card-head { background: linear-gradient(135deg, var(--n0bg), transparent); }
+.card-n0 .node-label { color: var(--n0); }
+.card-n1 .card-head { background: linear-gradient(135deg, var(--n1bg), transparent); }
+.card-n1 .node-label { color: var(--n1); }
+.card-n2 .card-head { background: linear-gradient(135deg, var(--n2bg), transparent); }
+.card-n2 .node-label { color: var(--n2); }
+.card-n3 .card-head { background: linear-gradient(135deg, var(--n3bg), transparent); }
+.card-n3 .node-label { color: var(--n3); }
+
+/* ─── LOG BOX ─── */
+.log-box {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+  padding: 14px 18px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11.5px; line-height: 1.7;
+  color: var(--text2);
+  word-break: break-all;
+  white-space: pre-wrap;
+  scroll-behavior: smooth;
+}
+.log-box:empty::after {
+  content: 'Kutilmoqda...';
+  color: var(--text3); font-style: italic;
+  font-family: 'Inter', sans-serif; font-size: 13px;
+}
+.log-box::-webkit-scrollbar { width: 5px; }
+.log-box::-webkit-scrollbar-track { background: transparent; margin: 4px 0; }
+.log-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+.log-box::-webkit-scrollbar-thumb:hover { background: #565f89; }
+
+/* ─── LOG LINES ─── */
+.log-line { padding: 1px 0; }
+.log-line.err  { color: #f7768e; font-weight: 500; }
+.log-line.wrn  { color: #e0af68; font-weight: 500; }
+.log-line.ok   { color: var(--n0); }
+.log-line.head { color: var(--text); font-weight: 600; }
+.log-line.inf  { color: var(--text2); }
+
+/* ─── RESPONSIVE ─── */
+
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="logo">📊</span>
+    <h1>Kaggle Node Loglar</h1>
+  </div>
+  <div class="topbar-right">
+    <span class="clock" id="clock">--:--:--</span>
+    <div class="status-dots">
+      <span class="status-item"><span class="pulse off" id="dot0"></span>N0</span>
+      <span class="status-item"><span class="pulse off" id="dot1"></span>N1</span>
+      <span class="status-item"><span class="pulse off" id="dot2"></span>N2</span>
+      <span class="status-item"><span class="pulse off" id="dot3"></span>OR</span>
+    </div>
+    <button class="btn" onclick="R()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"/>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>
+      Yangilash
+    </button>
+    <button class="btn btn-danger" id="clearBtn" onclick="clearLogs(this)" title="Barcha 3 panel loglarini tozalash">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        <line x1="10" y1="11" x2="10" y2="17"/>
+        <line x1="14" y1="11" x2="14" y2="17"/>
+      </svg>
+      Tozalash
+    </button>
+  </div>
+</div>
+
+<div class="action-bar">
+  <span class="ab-label">Amallar</span>
+  <button class="abtn" id="btn-all" onclick="runAction('--all')">🚀 Barcha launch <span class="spinner"></span></button>
+  <button class="abtn" id="btn-d" onclick="runAction('-d')">🗑️ Kernel o'chirish <span class="spinner"></span></button>
+  <button class="abtn" id="btn-i" onclick="runAction('-i')">📊 GPU kvota <span class="spinner"></span></button>
+  <button class="abtn" id="btn-m" onclick="runAction('-m')">📡 Monitoring <span class="spinner"></span></button>
+</div>
+
+<div class="main-grid">
+  <div class="card card-n0">
+    <div class="card-head">
+      <span class="node-label">🔮 Node-0 (LLM+TTS UZ)</span>
+      <div class="card-actions">
+        <span class="node-meta" id="m0">ulanilmoqda...</span>
+        <button class="copy-btn" onclick="copyLog(0)" title="Loglarni nusxalash">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="log-box" id="b0"></div>
+  </div>
+  <div class="card card-n1">
+    <div class="card-head">
+      <span class="node-label">🎤 Node-1 (STT RU+TTS)</span>
+      <div class="card-actions">
+        <span class="node-meta" id="m1">ulanilmoqda...</span>
+        <button class="copy-btn" onclick="copyLog(1)" title="Loglarni nusxalash">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="log-box" id="b1"></div>
+  </div>
+  <div class="card card-n2">
+    <div class="card-head">
+      <span class="node-label">🌐 Node-2 (STT EN+UZ)</span>
+      <div class="card-actions">
+        <span class="node-meta" id="m2">ulanilmoqda...</span>
+        <button class="copy-btn" onclick="copyLog(2)" title="Loglarni nusxalash">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="log-box" id="b2"></div>
+  </div>
+  <div class="card card-n3">
+    <div class="card-head">
+      <span class="node-label">⚙️ Orchestrator</span>
+      <div class="card-actions">
+        <span class="node-meta" id="m3">jonli...</span>
+        <button class="copy-btn" onclick="copyLog(3)" title="Loglarni nusxalash">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="log-box" id="b3"></div>
+  </div>
+</div>
+
+<!-- ─── AMAL NATIJASI MODAL ─── -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title" id="mTitle">Amal</div>
+        <div class="modal-sub" id="mSub">python3 launch_kaggle.py</div>
+      </div>
+      <button class="btn" onclick="closeModal()">✕ Yopish</button>
+    </div>
+    <div class="modal-body" id="mBody"><span class="ph">Ishga tushirilmoqda...</span></div>
+    <div class="modal-foot">
+      <span class="modal-status" id="mStatus">⏳ Boshlanmoqda...</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="copyModal(this)">📋 Nusxalash</button>
+        <button class="btn" onclick="closeModal()">Yopish</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════
+// ORCHESTRATOR URL — o'zgartiring agar kerak bo'lsa
+// ══════════════════════════════════════════════
+var ORCH_URL = window.location.origin;
+
+// yoki to'g'ridan to'g'ri:
+// var ORCH_URL = 'http://orchestrator.traffix.uz';
+
+var AS = {0: true, 1: true, 2: true, 3: true};
+var SS = {};
+
+function W(line) {
+  var c = 'log-line ';
+  if (/ERROR|XATO|xatolik|❌|Traceback/.test(line)) c += 'err';
+  else if (/WARNING|WARN|⚠/.test(line)) c += 'wrn';
+  else if (/✅|🎉|tayyor|ulandi|Tunnel:|GPU soni|Modellar:/.test(line)) c += 'ok';
+  else if (/──|ishga tushdi/.test(line)) c += 'head';
+  else c += 'inf';
+  var safe = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return '<div class="' + c + '">' + safe + '</div>';
+}
+
+function X(id) {
+  if (SS[id]) SS[id].close();
+  SS[id] = new EventSource(ORCH_URL + '/logs/stream/' + id);
+  var box = document.getElementById('b' + id);
+  var meta = document.getElementById('m' + id);
+  var dot = document.getElementById('dot' + id);
+
+  SS[id].onmessage = function(e) {
+    try {
+      var p = JSON.parse(e.data);
+      if (p.type === 'full') {
+        box.innerHTML = p.data.split('\n').map(W).join('');
+        if (AS[id]) box.scrollTop = box.scrollHeight;
+      }
+      if (p.type === 'clear') {
+        // Boshqa ochiq sahifada ham Tozalash bosilgan — DOM tozalanadi
+        box.innerHTML = '';
+        box.scrollTop = 0;
+      }
+      if (p.type === 'line') {
+        box.insertAdjacentHTML('beforeend', W(p.data));
+        if (p.data.indexOf('tushdi:') !== -1) {
+          var m = p.data.match(/(\d{2}:\d{2}:\d{2})/);
+          if (m) meta.textContent = '🟢 ' + m[1];
+          dot.className = id === 0 ? 'pulse green' : (id === 1 ? 'pulse cyan' : 'pulse purple');
+          dot.parentElement.style.color = 'var(--n' + id + ')';
+        }
+        if (p.data.indexOf('toxtadi') !== -1 || p.data.indexOf('to\u02BBtadi') !== -1) {
+          dot.className = 'pulse off';
+          dot.parentElement.style.color = 'var(--text2)';
+        }
+        if (AS[id] && (box.scrollHeight - box.scrollTop - box.clientHeight) < 100) {
+          box.scrollTop = box.scrollHeight;
+        }
+      }
+    } catch(ex) {}
+  };
+
+  SS[id].onerror = function() {
+    dot.className = 'pulse off';
+    dot.parentElement.style.color = 'var(--text2)';
+  };
+}
+
+// Scroll tracking
+[0, 1, 2, 3].forEach(function(id) {
+  var box = document.getElementById('b' + id);
+  box.addEventListener('scroll', function() {
+    AS[id] = (box.scrollHeight - box.scrollTop - box.clientHeight) < 80;
+  });
+});
+
+// Orchestrator o'z loglari stream'i (4-panel)
+function XO() {
+  if (SS.orch) SS.orch.close();
+  SS.orch = new EventSource(ORCH_URL + '/logs/stream/orch');
+  var box = document.getElementById('b3');
+  var meta = document.getElementById('m3');
+  var dot = document.getElementById('dot3');
+  SS.orch.onmessage = function(e) {
+    try {
+      var p = JSON.parse(e.data);
+      if (p.type === 'full') {
+        box.innerHTML = p.data.split('\n').map(W).join('');
+        box.scrollTop = box.scrollHeight;
+        dot.className = 'pulse amber';
+        dot.parentElement.style.color = 'var(--n3)';
+      }
+      if (p.type === 'clear') { box.innerHTML = ''; box.scrollTop = 0; }
+      if (p.type === 'line') {
+        box.insertAdjacentHTML('beforeend', W(p.data));
+        meta.textContent = 'jonli ✓';
+        dot.className = 'pulse amber';
+        dot.parentElement.style.color = 'var(--n3)';
+        if (box.scrollHeight - box.scrollTop - box.clientHeight < 100) {
+          box.scrollTop = box.scrollHeight;
+        }
+      }
+    } catch (ex) {}
+  };
+  SS.orch.onerror = function() {
+    dot.className = 'pulse off';
+    dot.parentElement.style.color = 'var(--text2)';
+  };
+}
+
+function R() {
+  [0, 1, 2].forEach(function(id) {
+    document.getElementById('b' + id).innerHTML = '';
+    X(id);
+  });
+  document.getElementById('b3').innerHTML = '';
+  XO();
+}
+
+// Barcha 3 panel loglarini tozalash (SSE uzilmaydi — yangi loglar kelaveradi)
+// Server bufferi ham tozalanadi — "Yangilash" bosilganda eski loglar qaytib kelmaydi
+function clearLogs(btn) {
+  try { fetch(ORCH_URL + '/logs/clear', { method: 'POST' }); } catch (e) {}
+  [0, 1, 2, 3].forEach(function(id) {
+    var box = document.getElementById('b' + id);
+    box.innerHTML = '';
+    box.scrollTop = 0;
+  });
+  // Tugma animatsiyasi: yashil "tozalandi" belgisi
+  if (btn) {
+    var old = btn.innerHTML;
+    btn.classList.add('cleared');
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Tozalandi';
+    setTimeout(function() {
+      btn.classList.remove('cleared');
+      btn.innerHTML = old;
+    }, 1500);
+  }
+}
+
+// Clipboard fallback (http / eski brauzerlar uchun)
+function _fbCopy(text) {
+  var ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(ta);
+}
+
+// Panel loglarini to'liq nusxalash
+function copyLog(id) {
+  var box = document.getElementById('b' + id);
+  var text = box.innerText || box.textContent || '';
+  if (!text) return;
+  var btn = document.querySelector('.card-n' + id + ' .copy-btn');
+  var old = btn.innerHTML;
+  var flash = function() {
+    btn.classList.add('copied');
+    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    setTimeout(function() {
+      btn.classList.remove('copied');
+      btn.innerHTML = old;
+    }, 1600);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(flash).catch(function() { _fbCopy(text); flash(); });
+  } else {
+    _fbCopy(text);
+    flash();
+  }
+}
+
+// ══════════════════════════════════════════════
+// launch_kaggle.py AMALLARI (--all, -d, -i, -m)
+// ══════════════════════════════════════════════
+var FLAG_INFO = {
+  '--all': {title: '🚀 Barcha node launch', cmd: 'python3 launch_kaggle.py --all'},
+  '-d':    {title: '🗑️ Kernel o\'chirish',  cmd: 'python3 launch_kaggle.py -d'},
+  '-i':    {title: '📊 GPU/TPU kvota',       cmd: 'python3 launch_kaggle.py -i'},
+  '-m':    {title: '📡 Node monitoring',     cmd: 'python3 launch_kaggle.py -m'}
+};
+var jobTimer = null;
+var BTN_ID = {'--all': 'btn-all', '-d': 'btn-d', '-i': 'btn-i', '-m': 'btn-m'};
+
+// Amallar uchun parol — HAR SAFAR so'raladi, eslab qolinmaydi
+function actKey() {
+  return prompt('Xavfsizlik: Amallar uchun parol (NODE_COMM_KEY):');
+}
+
+function runAction(flag) {
+  var info = FLAG_INFO[flag];
+  var key = actKey();
+  if (!key) return;
+  var ok = confirm(info.title + ' bajarilsinmi?');
+  if (!ok) return;
+
+  var btn = document.getElementById(BTN_ID[flag]);
+  btn.classList.add('busy');
+  btn.disabled = true;
+
+  var modal = document.getElementById('modal');
+  document.getElementById('mTitle').textContent = info.title;
+  document.getElementById('mSub').textContent = info.cmd;
+  document.getElementById('mBody').innerHTML = '<span class="ph">Ishga tushirilmoqda...</span>';
+  var st = document.getElementById('mStatus');
+  st.className = 'modal-status run';
+  st.textContent = '⏳ Boshlanmoqda...';
+  modal.classList.add('open');
+
+  fetch(ORCH_URL + '/api/kaggle/action', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Action-Key': key},
+    body: JSON.stringify({flag: flag})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) {
+      st.className = 'modal-status err';
+      st.textContent = '❌ ' + d.error;
+      doneBtn(btn);
+      return;
+    }
+    pollJob(d.job_id, btn, flag, key);
+  }).catch(function(e) {
+    st.className = 'modal-status err';
+    st.textContent = '❌ Xatolik: ' + e;
+    doneBtn(btn);
+  });
+}
+
+function pollJob(jobId, btn, flag, key) {
+  if (jobTimer) clearTimeout(jobTimer);
+  fetch(ORCH_URL + '/api/kaggle/job/' + jobId, {headers: {'X-Action-Key': key}}).then(function(r) { return r.json(); }).then(function(j) {
+    var body = document.getElementById('mBody');
+    var st = document.getElementById('mStatus');
+    if (j.error) {
+      st.className = 'modal-status err';
+      st.textContent = '❌ ' + j.error;
+      doneBtn(btn);
+      return;
+    }
+    // Output'ni chiroyli render qilish
+    if (j.output && j.output.length) {
+      body.innerHTML = j.output.map(W).join('');
+      body.scrollTop = body.scrollHeight;
+    }
+    if (j.status === 'done') {
+      st.className = j.exit === 0 ? 'modal-status ok' : 'modal-status err';
+      st.textContent = j.exit === 0 ? '✅ Yakunlandi (exit=0)' : '❌ Yakunlandi (exit=' + j.exit + ')';
+      doneBtn(btn);
+    } else if (j.status === 'error') {
+      st.className = 'modal-status err';
+      st.textContent = '❌ Xatolik yuz berdi';
+      doneBtn(btn);
+    } else {
+      st.className = 'modal-status run';
+      st.textContent = '⏳ Bajarilmoqda...';
+      jobTimer = setTimeout(function() { pollJob(jobId, btn, flag, key); }, 1200);
+    }
+  }).catch(function(e) {
+    var st = document.getElementById('mStatus');
+    st.className = 'modal-status err';
+    st.textContent = '❌ Xatolik: ' + e;
+    doneBtn(btn);
+  });
+}
+
+function doneBtn(btn) {
+  if (!btn) return;
+  btn.classList.remove('busy');
+  btn.disabled = false;
+}
+
+function closeModal() {
+  if (jobTimer) clearTimeout(jobTimer);
+  document.getElementById('modal').classList.remove('open');
+}
+
+function copyModal(btnEl) {
+  var body = document.getElementById('mBody');
+  var text = body.innerText || body.textContent || '';
+  if (!text) return;
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).catch(function() { _fbCopy(text); });
+  } else {
+    _fbCopy(text);
+  }
+  btnEl.textContent = '✅ Nusxalandi';
+  setTimeout(function() { btnEl.textContent = '📋 Nusxalash'; }, 1500);
+}
+
+function T() {
+  var n = new Date();
+  document.getElementById('clock').textContent = n.toLocaleTimeString('uz-UZ', { hour12: false });
+}
+
+setInterval(T, 1000);
+T();
+R();
+</script>
+
+</body>
+</html>

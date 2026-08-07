@@ -17,6 +17,7 @@ import json
 from orchestrator.vad_utils import vad_model
 from orchestrator.security.guardrail import guardrail
 from orchestrator.security_utils import encrypt_payload, decrypt_payload
+from orchestrator.audio_utils import wav_to_pcm
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,9 @@ logger = logging.getLogger(__name__)
 # ─────────────────── CALL SESSION ───────────────────
 
 class CallSession:
-    def __init__(self, call_id):
+    def __init__(self, call_id, sample_rate=8000):
         self.call_id = call_id
+        self.sample_rate = sample_rate   # SIP/RTP=8000, WebSocket=16000
         self.audio_buffer = bytearray()
         self.chunk_buffer = bytearray()
         self.is_speaking = False
@@ -34,18 +36,25 @@ class CallSession:
         self.SILENCE_THRESHOLD = 0.8
         self.CHUNK_SIZE = 512
         self.language = "uz"
+        self.caller_name = ""          # Twilio `from` dan olinadi (system prompt uchun)
 
     def add_pcm_chunk(self, pcm_data: bytes):
         self.chunk_buffer.extend(pcm_data)
         if len(self.chunk_buffer) >= self.CHUNK_SIZE:
             chunk = self.chunk_buffer[:self.CHUNK_SIZE]
             self.chunk_buffer = self.chunk_buffer[self.CHUNK_SIZE:]
-            has_speech = vad_model.is_speech(bytes(chunk))
+            has_speech = vad_model.is_speech(bytes(chunk), self.sample_rate)
             if has_speech:
                 self.is_speaking = True
                 self.silence_start_time = None
                 self.last_speech_time = time.time()
                 self.audio_buffer.extend(chunk)
+                # Buffer chegarasi (~12s audio): to'xtovsiz gapiruvchi uzoq
+                # suhbatda xotira o'sib ketmasligi uchun majburiy flush.
+                max_bytes = self.sample_rate * 2 * 12
+                if len(self.audio_buffer) >= max_bytes:
+                    self.is_speaking = False
+                    return self.flush_audio()
             elif self.is_speaking:
                 self.audio_buffer.extend(chunk)
                 if self.silence_start_time is None:
@@ -67,7 +76,7 @@ class CallSession:
         with wave.open(wav_io, 'wb') as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(8000)
+            wav_file.setframerate(self.sample_rate)
             wav_file.writeframes(audio_data)
         wav_bytes = wav_io.getvalue()
         logger.info(f"[VAD] 🎤 Call {self.call_id} — {len(wav_bytes)} bayt audio tayyor.")
@@ -133,6 +142,16 @@ class StreamController:
         self.stt_endpoints = {}
         self.tts_endpoints = {}
         self.llm_endpoint = None
+        self._call_locks = {}       # call_id -> asyncio.Lock (pipeline serializatsiya)
+        self._last_prewarm = 0.0    # _prewarm_llm TTL uchun
+        self._tasks = set()         # fire-and-forget task'lar GC bo'lmasligi uchun
+
+    def _spawn(self, coro):
+        """Coroutine'ni task sifatida ishga tushiradi va GC'dan himoya qiladi."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     def update_endpoints(self, stt, tts, llm):
         self.stt_endpoints = stt
@@ -147,6 +166,11 @@ class StreamController:
         return self.sessions[call_id]
 
     def _prewarm_llm(self):
+        """LLM ni oldindan isitish — har call'da emas, 120s da bir marta."""
+        now = time.time()
+        if now - self._last_prewarm < 120:
+            return
+        self._last_prewarm = now
         import threading
         def _do():
             try:
@@ -164,13 +188,25 @@ class StreamController:
         completed_wav = session.add_pcm_chunk(pcm_chunk)
         if completed_wav:
             logger.info(f"[StreamController] 🎧 Call {call_id} → STT ({session.language})")
-            asyncio.create_task(self.route_to_ai(call_id, session.language, completed_wav))
+
+            async def _route():
+                # Bir call uchun pipeline ketma-ket ishlaydi —
+                # ikki tez ibora parallel ketsa LLM history aralashmasin.
+                lock = self._call_locks.setdefault(call_id, asyncio.Lock())
+                async with lock:
+                    await self.route_to_ai(call_id, session.language, completed_wav)
+
+            self._spawn(_route())
 
     # ─────────────────── ASOSIY AI PIPELINE ───────────────────
 
     async def route_to_ai(self, call_id, language, wav_bytes):
         from orchestrator.session_manager import session_manager
         from orchestrator.profile_manager import profile_manager
+
+        # Tilga mos profil avval tanlanadi — session system prompt'i
+        # noto'g'ri (UZ) profil bilan yaratilmasligi uchun.
+        profile_manager.auto_select(language)
 
         # 1. STT
         stt_url = self.stt_endpoints.get(language)
@@ -196,6 +232,13 @@ class StreamController:
             logger.info(f"[{call_id}] 📝 STT: {text[:80]}")
 
             # 2. Guardrail
+            # caller_name (Twilio `from`) system prompt'ga tushishi uchun
+            # session yaratilishidan oldin uzatamiz.
+            caller_name = ""
+            _sess = self.sessions.get(call_id)
+            if _sess is not None:
+                caller_name = getattr(_sess, "caller_name", "") or ""
+            session_manager.get_session(call_id, caller_name=caller_name, language=language)
             session_manager.add_message(call_id, "user", text)
             if guardrail.check_input_violation(text):
                 ai_text = (
@@ -208,7 +251,6 @@ class StreamController:
                 return
 
             # 3. LLM + Tool Loop
-            profile_manager.auto_select(language)
             session_manager.update_ttl_from_config()
 
             llm_params = profile_manager.get_llm_params()
@@ -239,7 +281,7 @@ class StreamController:
             if not self.llm_endpoint:
                 return "LLM endpoint topilmadi."
 
-            chat_data = {"messages": history, "tools": tools}
+            chat_data = {"messages": history, "tools": tools, "llm": llm_params}
             enc_chat = encrypt_payload(json.dumps(chat_data).encode('utf-8'))
 
             llm_res = await loop.run_in_executor(None, lambda: requests.post(
@@ -282,15 +324,19 @@ class StreamController:
             loop = asyncio.get_running_loop()
             enc_tts = encrypt_payload(text.encode('utf-8'))
             tts_res = await loop.run_in_executor(None, lambda: requests.post(
-                tts_url, json={"encrypted_text": enc_tts}, timeout=20))
+                tts_url, json={"encrypted_text": enc_tts}, timeout=30))
             if tts_res.status_code == 200:
-                enc_audio = tts_res.json().get("encrypted_audio", "")
-                if enc_audio:
-                    tts_wav = decrypt_payload(enc_audio)
-                    session = self.sessions.get(call_id)
-                    if session and getattr(session, 'send_audio_callback', None):
-                        with wave.open(io.BytesIO(tts_wav), 'rb') as w:
-                            session.send_audio_callback(w.readframes(w.getnframes()))
+                # Node'lar raw WAV (FileResponse) qaytaradi
+                tts_wav = tts_res.content or b""
+                if not tts_wav:
+                    return
+                session = self.sessions.get(call_id)
+                if session and getattr(session, 'send_audio_callback', None):
+                    # WAV -> raw PCM, call oynasining rate'iga (SIP=8k, WS=16k)
+                    target_rate = getattr(session, 'sample_rate', 8000)
+                    pcm = await asyncio.to_thread(wav_to_pcm, tts_wav, target_rate)
+                    if pcm:
+                        session.send_audio_callback(pcm)
         except Exception as e:
             logger.error(f"TTS xatolik: {e}")
 
@@ -330,8 +376,29 @@ class StreamController:
         asyncio.create_task(_trigger())
 
     def end_call(self, call_id):
-        if call_id in self.sessions:
-            del self.sessions[call_id]
+        # Mijoz gapirib tugatib darrov qo'ng'iroqni uza boshlagan bo'lsa,
+        # oxirgi ibora hali flush bo'lmagan bo'lishi mumkin — uni qayta ishlaymiz.
+        # Session _final_utterance tugaguncha saqlanadi (TTS callback ishlashi uchun),
+        # keyin tozalanadi.
+        session = self.sessions.get(call_id)
+        if session is not None:
+            pending = session.flush_audio()
+            if pending:
+                lang = session.language
+
+                async def _final_utterance():
+                    try:
+                        lock = self._call_locks.setdefault(call_id, asyncio.Lock())
+                        async with lock:
+                            await self.route_to_ai(call_id, lang, pending)
+                    finally:
+                        self.sessions.pop(call_id, None)
+                        self._call_locks.pop(call_id, None)
+
+                self._spawn(_final_utterance())
+                return
+        self.sessions.pop(call_id, None)
+        self._call_locks.pop(call_id, None)
 
 
 stream_controller = StreamController()

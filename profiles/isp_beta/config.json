@@ -3,7 +3,7 @@
     "bot_name": "Zarnigor",
     "crm_type": "dummy",
     "language": "uz",
-    "prompt_version": "v3",
+    "prompt_version": "v1",
     "prompt_folder": "isp_beta",
     "llm": {
         "temperature": 0.3,

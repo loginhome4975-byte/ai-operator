@@ -49,3 +49,74 @@ def ensure_wav_16k_mono(audio_bytes: bytes) -> bytes:
     except Exception as e:
         log.warning(f"Pydub/ffmpeg konversiyasi ishlamadi, asl audio qaytarildi: {e}")
         return audio_bytes
+
+
+def wav_to_pcm(audio_bytes: bytes, target_rate: int = 16000) -> bytes:
+    """WAV baytlaridan raw PCM (mono, 16-bit, target_rate) ajratib oladi.
+
+    - Har qanday WAV (sample_width 1/2/4, stereo/mono, istalgan rate) qabul qilinadi.
+    - Sample rate o'zgartiriladi (numpy interp, linear resample).
+    - Konversiya imkoni bo'lmasa yoki audio buzilgan bo'lsa b'' qaytaradi.
+    - SIP path (RTP ulaw, 8kHz) va WS path (16kHz) uchun bitta manba.
+    """
+    if not audio_bytes:
+        return b""
+    try:
+        with io.BytesIO(audio_bytes) as buf:
+            with _wave.open(buf, "rb") as w:
+                sampwidth = w.getsampwidth()
+                channels = w.getnchannels()
+                framerate = w.getframerate()
+                raw = w.readframes(w.getnframes())
+    except Exception as e:
+        log.debug(f"wav_to_pcm: WAV ochilmadi: {e}")
+        return b""
+
+    # Sample width → 16-bit
+    if sampwidth != 2:
+        try:
+            import audioop
+            if sampwidth == 1:
+                # audioop.bias(fragment, width, bias) — 3 argument kerak
+                raw = audioop.bias(raw, 1, 128)
+            elif sampwidth == 4:
+                raw = audioop.lin2lin(raw, 4, 2)
+            else:
+                return b""
+            sampwidth = 2
+        except Exception as e:
+            log.debug(f"wav_to_pcm: sampwidth convert skip: {e}")
+            return b""
+
+    # Stereo → mono
+    if channels > 1:
+        try:
+            import audioop
+            raw = audioop.tomono(raw, sampwidth, 1, 0)
+            channels = 1
+        except Exception as e:
+            log.debug(f"wav_to_pcm: tomono skip: {e}")
+            return b""
+
+    # Rate → target_rate
+    if framerate != target_rate:
+        try:
+            import numpy as np
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+            n = len(samples)
+            if n == 0:
+                return b""
+            target_n = int(round(n * target_rate / float(framerate)))
+            if target_n <= 0:
+                return b""
+            xp = np.linspace(0.0, 1.0, num=n)
+            x = np.linspace(0.0, 1.0, num=target_n)
+            resampled = np.interp(x, xp, samples)
+            return resampled.astype(np.int16).tobytes()
+        except Exception as e:
+            log.debug(f"wav_to_pcm: numpy resample unavailable: {e}")
+            return b""
+
+    if sampwidth == 2 and channels == 1:
+        return raw
+    return b""

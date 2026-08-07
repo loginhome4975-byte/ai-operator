@@ -21,17 +21,17 @@ import httpx
 import redis
 import pydantic
 from fastapi import (
-    FastAPI, HTTPException, Form,
+    FastAPI, HTTPException, UploadFile, File, Form,
     Depends, Security, WebSocket, WebSocketDisconnect, Header, Query, Request,
 )
-from fastapi.responses import PlainTextResponse, FileResponse
+from fastapi.responses import PlainTextResponse, FileResponse, StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Counter, Histogram, generate_latest
 
 from security_utils import encrypt_payload, decrypt_payload
 from session_manager import session_manager
-from vad_utils import vad_model
-from audio_utils import ensure_wav_16k_mono
+from audio_utils import ensure_wav_16k_mono, wav_to_pcm
+from stream_controller import stream_controller
 
 # Background cleanup task reference (hoisted for shutdown handler)
 _cleanup_task = None
@@ -96,6 +96,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("orchestrator")
 
+# /health endpoint'lar uchun access log spam'ni bosish
+class _HealthFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        return "/health" not in msg and "/metrics" not in msg
+
+logging.getLogger("uvicorn.access").addFilter(_HealthFilter())
+
 # Alohida audit logger — PII_AUDIT rows uchun.
 # `grep WARNING`-dan ajralib turadi, structured JSON maydonlari uchun tayyor.
 audit_log = logging.getLogger("audit")
@@ -128,6 +136,32 @@ MAX_CONCURRENT_CALLS = int(os.getenv("MAX_CONCURRENT_CALLS", "50"))
 # Active_calls kaliti uchun TTL (s) — orchestrator mid-call crash bo'lsa
 # counter abadiy oshib qolmasligi uchun. 1 soatdan keyin avtomatik reset.
 ACTIVE_CALLS_TTL = int(os.getenv("ACTIVE_CALLS_TTL", "3600"))
+# Redis ishlamasa in-memory fallback counter (audit fix: Redis tushsa
+# WebSocket call'lar 1011 bilan yopilmasin)
+_local_active_calls = 0
+_local_calls_lock = threading.Lock()
+
+
+async def _redis_incr_active():
+    """Redis orqali active_calls ni oshirish; Redis tushsa lokal counter."""
+    global _local_active_calls
+    try:
+        cur = await asyncio.to_thread(redis_client.incr, "active_calls")
+        await asyncio.to_thread(redis_client.expire, "active_calls", ACTIVE_CALLS_TTL)
+        return cur
+    except Exception:
+        with _local_calls_lock:
+            _local_active_calls += 1
+            return _local_active_calls
+
+
+async def _redis_decr_active():
+    global _local_active_calls
+    try:
+        await asyncio.to_thread(redis_client.decr, "active_calls")
+    except Exception:
+        with _local_calls_lock:
+            _local_active_calls = max(0, _local_active_calls - 1)
 
 # ----------------- CORS (C6 fix) -----------------
 # Wildcard + credentials birga ishlamaydi. Faqat aniq originlarga ruxsat beramiz.
@@ -147,8 +181,8 @@ app.add_middleware(
 # endi asosiy API_KEY env-only konfiguratsiya 5-qatorga yaqin joyda ko'rinadi.)
 
 # Cloud Notebook (Kaggle) Ngrok IP manzillari
-KAGGLE_URL = os.getenv("KAGGLE_URL", "http://127.0.0.1:5000")      # LLM & TTS UZ
-KAGGLE1_URL = os.getenv("KAGGLE1_URL", "http://127.0.0.1:5001")    # STT RU & TTS RU/EN
+KAGGLE_URL = os.getenv("KAGGLE_URL", "http://127.0.0.1:5001")      # LLM & TTS UZ
+KAGGLE1_URL = os.getenv("KAGGLE1_URL", "http://127.0.0.1:5003")    # STT RU & TTS RU/EN
 KAGGLE2_URL = os.getenv("KAGGLE2_URL", "http://127.0.0.1:5002")    # STT EN & STT UZ
 
 # Ikkita API kalit endi environmentdan keladi, default YO'Q.
@@ -362,7 +396,7 @@ def _abort_startup(reason: str, code: int = 2):
     try:
         print(stderr_msg, file=sys.stderr, flush=True)
     except Exception:
-        pass
+        print(f"FATAL_STDERR: {log_msg}", file=sys.stderr, flush=True)
     sys.exit(code)
 
 
@@ -408,6 +442,9 @@ async def startup_event():
     global HEADERS_BASE, async_http
     HEADERS_BASE = {"Content-Type": "application/json"}
     async_http = httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=HEADERS_BASE)
+    # Audit fix: endpoint'lar .env'dan kelsa ham stream_controller start'dayoq
+    # ularni bilishi kerak — aks holda SIP/WS path restart'dan keyin o'lik qolardi.
+    stream_controller.update_endpoints(STT_ENDPOINTS, TTS_ENDPOINTS, LLM_ENDPOINT)
     try:
         await asyncio.to_thread(redis_client.ping)
         log.info("Redis reachable")
@@ -417,6 +454,8 @@ async def startup_event():
     # Health monitor + analytics persistence
     asyncio.create_task(_node_health_monitor())
     asyncio.create_task(_analytics_persistence_loop())
+    # Log dashboard streams
+    _start_log_streams()
     # Analytics'ni diskdan tiklash
     await _restore_analytics_from_disk()
 
@@ -432,10 +471,21 @@ async def shutdown_event():
             pass
     if async_http:
         await async_http.aclose()
+    # Log stream thread'larini to'xtatish
+    _log_stop_streams.set()
+    # Ishlayotgan Kaggle job'larini to'xtatish — restart'da yolg'iz qolmasin
+    with _kaggle_jobs_lock:
+        procs = list(_kaggle_procs.values())
+        _kaggle_procs.clear()
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
     try:
         await asyncio.to_thread(redis_client.close)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"Redis yopishda xatolik: {e}")
 
 
 # ----------------- SETTINGS / ANALYTICS -----------------
@@ -583,6 +633,307 @@ async def verify_node_key(x_api_key: Optional[str] = Header(default=None)):
 # Thread-safe lock for node registration endpoints
 _node_registration_lock = asyncio.Lock()
 
+# ─────────────────── LOG DASHBOARD ───────────────────
+import queue as _queue
+_log_buffers: dict[int, list] = {0: [], 1: [], 2: []}
+_log_subs: dict[int, list] = {0: [], 1: [], 2: []}
+_log_status: dict[int, str] = {0: "offline", 1: "offline", 2: "offline"}
+# _push() va /logs/clear orasida buffer'ni himoya qiluvchi lock —
+# buffer qayta tayinlash ([-500:] slice) tozalashni "yutib" qo'ymasligi uchun
+_log_buffers_lock = threading.Lock()
+
+# ── Orchestrator O'Z LOGLARI (web panelga uzatish) ──
+_orch_buffer: list = []
+_orch_subs: list = []
+# Access log (HTTP so'rovlar), httpx so'rovlar va /health shovqini panelga chiqmaydi
+# (httpx connection-refused qatorlari ham — node health monitor spam qilmasin)
+_ORCH_NOISE_RE = re.compile(r"HTTP/1\.1|HTTP Request|/health|/logs/stream|GET /logs|POST /logs|/metrics", re.I)
+
+
+def _push_orch(line: str):
+    """Orchestrator log qatorini buffer'ga qo'shish + barcha client'larga yuborish."""
+    with _log_buffers_lock:
+        _orch_buffer.append(line)
+        if len(_orch_buffer) > 500:
+            del _orch_buffer[:-500]
+    for q in list(_orch_subs):
+        try:
+            q.put_nowait({"type": "line", "data": line})
+        except _queue.Full:
+            pass
+
+
+class _WebLogHandler(logging.Handler):
+    """Orchestrator loglarini web panelga real-time uzatuvchi handler.
+    Access log (HTTP so'rovlar) va /health shovqini filtrlanadi."""
+    def emit(self, record: logging.LogRecord):
+        try:
+            msg = self.format(record)
+            if _ORCH_NOISE_RE.search(msg):
+                return
+            _push_orch(msg)
+        except Exception:
+            pass
+
+
+_web_handler = _WebLogHandler()
+_web_handler.setLevel(logging.INFO)
+_web_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s"))
+# Handler takrorlanishidan himoya — modul qayta import qilinsa dublikat qatorlar paydo bo'lmasin
+if _web_handler not in logging.getLogger().handlers:
+    logging.getLogger().addHandler(_web_handler)
+
+LOG_KERNELS = {
+    0: ("bunyodbek7/ai-operator-kaggle-node", "KAGGLE_USERNAME", "KAGGLE_KEY"),
+    1: ("bunyodozodboyev/ai-operator-kaggle-node-1", "KAGGLE_USERNAME_1", "KAGGLE_KEY_1"),
+    2: ("bunyodbekozodboyev/ai-operator-kaggle-node-2", "KAGGLE_USERNAME_2", "KAGGLE_KEY_2"),
+}
+LOG_LABELS = {0: "Node-0 (LLM+TTS UZ)", 1: "Node-1 (STT RU+TTS)", 2: "Node-2 (STT EN+UZ)"}
+LOG_COLORS = {0: "#22c55e", 1: "#06b6d4", 2: "#a855f7"}
+
+
+# Oqim uzilgach, YANGI PUSH kutiladigan vaqt oralig'i — har 30s JIM tekshiriladi.
+# (kernel qayta push qilinmaguncha qayta ulanish yo'q — 20s "qayta ulanmoqda" spam bo'lmaydi)
+_LOG_PUSH_WAIT_S = 30
+_LOG_POLL_S = 10
+_log_stop_streams = threading.Event()
+
+
+def _node_env(nid: int, user_env: str, key_env: str) -> dict:
+    """Node'ga xos Kaggle env — KGAT_ prefiksli kalit KAGGLE_API_TOKEN sifatida."""
+    env = os.environ.copy()
+    env["KAGGLE_USERNAME"] = os.environ.get(user_env, "")
+    env["KAGGLE_KEY"] = os.environ.get(key_env, "")
+    env.pop("KAGGLE_API_TOKEN", None)
+    suffix = "" if nid == 0 else f"_{nid}"
+    token = os.environ.get(f"KAGGLE_API_TOKEN{suffix}", "")
+    if not token:
+        key = os.environ.get(f"KAGGLE_KEY{suffix}", "")
+        if key.startswith("KGAT_"):
+            token = key
+    if token:
+        env["KAGGLE_API_TOKEN"] = token
+        env.pop("KAGGLE_KEY", None)
+        env.pop("KAGGLE_USERNAME", None)
+    return env
+
+
+def _kaggle_bin() -> str:
+    """kaggle CLI to'liq yo'li — sudo bilan ishlaganda PATH'da bo'lmasligi mumkin."""
+    import shutil as _shutil
+    return _shutil.which("kaggle") or os.path.expanduser("~/.local/bin/kaggle")
+
+
+def _find_active_kernel(nid: int, user_env: str, key_env: str, fallback: str):
+    """Akkauntdagi FAOL (eng oxirgi ishlatilgan) kernel slug'ini aniqlaydi.
+    Har akkauntda doim bitta faol kernel bor — shuni topib qaytaramiz,
+    hardcoded slug'dan adashmaslik uchun.
+    Qaytaradi: (ref, lastRunTime) — kernel topilmasa (fallback, '')."""
+    import subprocess as _sp
+    env = _node_env(nid, user_env, key_env)
+    try:
+        r = _sp.run([_kaggle_bin(), "kernels", "list", "--mine", "--csv"],
+                    capture_output=True, text=True, timeout=30, env=env)
+        lines = [l.strip() for l in r.stdout.strip().split("\n") if l.strip()]
+        best, best_time = None, None
+        for line in lines[1:]:  # header o'tkazib yuboriladi
+            cols = line.split(",")
+            if not cols:
+                continue
+            ref = cols[0].strip().strip('"')
+            if not ref or ref.startswith("[Private"):
+                continue
+            t = cols[3].strip().strip('"') if len(cols) > 3 else ""
+            if best is None or t > (best_time or ""):
+                best, best_time = ref, t
+        if best:
+            return best, best_time or ""
+    except Exception:
+        pass
+    return fallback, ""
+
+
+def _kernel_status(kernel: str, nid: int, user_env: str, key_env: str) -> str:
+    """Kernel holati — 'running' bo'lsa stream qayta ulanadi (jonli stream tiklash),
+    tugagan/o'chirilgan bo'lsa yangi push kutiladi. Xato bo'lsa 'unknown'."""
+    import subprocess as _sp
+    env = _node_env(nid, user_env, key_env)
+    try:
+        r = _sp.run([_kaggle_bin(), "kernels", "status", kernel],
+                    capture_output=True, text=True, timeout=15, env=env)
+        if r.returncode == 0:
+            up = r.stdout.upper()
+            if "RUNNING" in up:
+                return "running"
+            # Kaggle CLI chiqishi: `... has status "complete"` (status qo'shtirnoqda)
+            m = re.search(r'HAS STATUS\s+"?(\w+)"?', up)
+            if m:
+                return m.group(1).lower()
+    except Exception:
+        pass
+    return "unknown"
+
+
+# kaggle CLI'ning o'z xabarlari — kernel log faylida EMAS, sanash va ko'rsatishdan chiqarib tashlanadi
+_CLI_NOISE_RE = re.compile(r"Log stream connection|giving up|reconnecting", re.I)
+# Progress bar / yuklab olish shovqini — yashiriladi (qator ichida xato bo'lsa baribir ko'rsatiladi)
+_PROGRESS_NOISE_RE = re.compile(
+    r"^\s*Downloading: "       # HF / spacy yuklab olish boshlanishi
+    r"|^\s*\d+%\|"             # tqdm: "  5%|####"
+    r"|it/s[,\]]?"             # tqdm oxiri: "...it/s]" yoki "...it/s,"
+    r"|Materializing param=",  # transformers og'irlik materializatsiyasi
+    re.I,
+)
+_ERROR_HINT_RE = re.compile(r"error|traceback|xato|fail|exception", re.I)
+# Sof bezak/ajratgich qatorlari — "********" kabi — ko'rsatilmaydi
+_DECOR_NOISE_RE = re.compile(r"^\s*\*+\s*$")
+# WARNING belgisi — hech qachon yashirilmaydi (ogohlantirishlar muhim)
+_WARNING_RE = re.compile(r"warning|ogohlantirish", re.I)
+
+
+def _is_log_noise(line: str) -> bool:
+    """Ko'rsatishda yashiriladigan shovqin qatorlari.
+    Progress bar, yuklab olish, bezak va bo'sh qatorlar yashiriladi — lekin:
+      • qator ichida xato matni bo'lsa ('ERROR', 'Traceback' va h.k.) ko'rsatiladi
+      • WARNING / ogohlantirish qatorlari DOIM ko'rsatiladi"""
+    if _CLI_NOISE_RE.search(line):
+        return True
+    if _WARNING_RE.search(line):
+        return False  # ogohlantirishlar yashirilmaydi
+    if not line.strip():
+        return True   # bo'sh / faqat bo'sh joy qatori
+    if _DECOR_NOISE_RE.search(line):
+        return True   # "********" bezak qatori
+    if _PROGRESS_NOISE_RE.search(line) and not _ERROR_HINT_RE.search(line):
+        return True
+    return False
+
+
+def _start_log_streams():
+    """Background: har bir Kaggle node uchun FAOL kernel log stream'i.
+    Oqim uzilsa qayta ulanish FAQAT yangi push bo'lganda amalga oshadi
+    (kernel lastRunTime si yangilansa) — aks holda jim kutadi."""
+    import subprocess as _sp
+    _log_stop_streams.clear()
+    for nid in [0, 1, 2]:
+        fallback_kernel, user_env, key_env = LOG_KERNELS[nid]
+        user = os.environ.get(user_env, "")
+        key = os.environ.get(key_env, "")
+        if not key or not user:
+            _log_status[nid] = "kalit yo'q"
+            missing = [v for v, c in [(user_env, user), (key_env, key)] if not c]
+            _log_buffers[nid].append(f"⚠️  {', '.join(missing)} topilmadi")
+            for q in list(_log_subs[nid]):
+                try: q.put_nowait({"type":"line","data":_log_buffers[nid][-1]})
+                except _queue.Full: pass
+            continue
+        _log_status[nid] = "connecting"
+        info = f"🔌 {LOG_LABELS[nid]} | faol kernel qidirilmoqda..."
+        _log_buffers[nid].append(info)
+        for q in list(_log_subs[nid]):
+            try: q.put_nowait({"type":"line","data":info})
+            except _queue.Full: pass
+
+        def _push(nid=nid, line=""):
+            """Buffer'ga qo'shish + barcha ulangan client'larga yuborish."""
+            with _log_buffers_lock:
+                _log_buffers[nid].append(line)
+                if len(_log_buffers[nid]) > 500:
+                    # In-place trim — buffer obyekti o'zgarmaydi, shuning uchun
+                    # /logs/clear bilan race bo'lmaydi (eski loglar qaytib kelmaydi)
+                    del _log_buffers[nid][:-500]
+            for q in list(_log_subs[nid]):
+                try: q.put_nowait({"type":"line","data":line})
+                except _queue.Full: pass
+
+        def _stream(nid=nid, user_env=user_env, key_env=key_env,
+                    fallback_kernel=fallback_kernel):
+            env = _node_env(nid, user_env, key_env)
+            label = LOG_LABELS[nid]
+            tracked = None    # (ref, lastRunTime) — oxirgi ulangan kernel ma'lumoti
+            shown_raw = 0     # bu kernel uchun allaqachon ko'rsatilgan xom qatorlar soni
+            stale = 0         # ketma-ket BO'SH qayta ulanishlar soni
+            kernel_dead = False  # kernel o'lgan (2+ bo'sh reconnect) — faqat yangi pushga javob beramiz
+            while not _log_stop_streams.is_set():
+                # 1) Faol kernel + uning lastRunTime si — yangi push'ni aniqlash uchun
+                kernel, ktime = _find_active_kernel(nid, user_env, key_env, fallback_kernel)
+                skip_raw = 0
+                # Qayta ulanish shartlari:
+                #   a) YANGI PUSH: kernel lastRunTime si yangilangan yoki boshqa kernel paydo bo'lgan
+                #   b) JONLI STREAM TIKLASH: eski kernel hali ishlayapti (stream vaqtincha uzilgan)
+                # Aks holda JIM kutamiz — 20s "qayta ulanmoqda" spam bo'lmaydi.
+                if tracked is not None:
+                    prev_ref, prev_time = tracked
+                    new_push = bool(ktime) and (ktime > prev_time or kernel != prev_ref)
+                    if not new_push:
+                        # Kernel hali ishlayaptimi? (vaqtinchalik uzilish bo'lsa jonli stream tiklanadi)
+                        # kernel_dead=True bo'lsa — qayta ulanish MAYDI, faqat yangi push kutamiz.
+                        if not kernel_dead and _kernel_status(prev_ref, nid, user_env, key_env) == "running":
+                            kernel, ktime = prev_ref, prev_time
+                            # Bir xil kernelga qayta ulanish: `kaggle kernels logs` to'liq tarixni
+                            # boshidan yuklaydi — allaqachon ko'rsatilgan qatorlarni skip qilamiz,
+                            # faqat YANGI qatorlar ko'rinadi (dublikat bo'lmaydi).
+                            skip_raw = shown_raw
+                        else:
+                            _log_status[nid] = "waiting"
+                            _log_stop_streams.wait(_LOG_PUSH_WAIT_S)  # yangi push yo'q — jim kutish
+                            continue
+                    else:
+                        shown_raw = 0      # yangi push — to'liq tarix ko'rsatiladi
+                        kernel_dead = False  # yangi push kelgan — kernel qayta ishga tushgan
+                tracked = (kernel, ktime or "")
+                try:
+                    # 2) Log stream ochish (-f = follow, real-time)
+                    proc = _sp.Popen([_kaggle_bin(), "kernels", "logs", kernel, "-f"],
+                        stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, env=env, bufsize=1)
+                    _log_status[nid] = "running"
+                    on = time.strftime('%H:%M:%S')
+                    _push(nid, f"── {label} | {kernel} | ishga tushdi: {on} ──")
+                    raw_read = 0
+                    skip_start = skip_raw
+                    for raw in iter(proc.stdout.readline, ""):
+                        line = raw.rstrip("\n").rstrip("\r")
+                        if _is_log_noise(line):
+                            continue  # shovqin qatori — ko'rsatilmaydi va sanalmaydi
+                        raw_read += 1
+                        if skip_raw > 0:
+                            skip_raw -= 1  # eski tarix — ko'rsatilmaydi, faqat hisoblanadi
+                            continue
+                        if "/health" in line:
+                            continue
+                        _push(nid, line)
+                    # FAQAT YANGI qatorlarni hisobga olamiz: qayta replay qilingan eski
+                    # qatorlar (skip_start - skip_raw) ikki marta sanalmasin — aks holda
+                    # skip byudjeti 2+ qayta ulanishda oshib, jonli log'lar yo'qolardi.
+                    shown_raw += raw_read - (skip_start - skip_raw)
+                    rc = proc.wait(timeout=5)
+                    _log_status[nid] = "waiting"
+                    _push(nid, f"🔄 {label} oqim to'xtadi (exit={rc}) — yangi push kutilmoqda...")
+                    # Bo'sh qayta ulanish aniqlash: qayta ulanishda HECH QANDAY yangi qator
+                    # chiqmagan bo'lsa (hammasi skip) va stream darhol tugasa — kernel o'lgan.
+                    # Ketma-ket 2 marta bo'lsa kernel_dead=True — qayta ulanish to'xtaydi,
+                    # faqat yangi push (lastRunTime o'zgarishi) kelganda tiklanadi.
+                    new_shown = raw_read - (skip_start - skip_raw)
+                    if skip_start > 0 and new_shown == 0:
+                        stale += 1
+                        if stale >= 2:
+                            kernel_dead = True
+                            stale = 0
+                    else:
+                        stale = 0
+                except Exception as e:
+                    _log_status[nid] = f"error: {e}"
+                    _push(nid, f"⚠️  {label}: {e} — yangi push kutilmoqda")
+                    # Uzluksiz xatolar (tarmoq/auth uzilishi) ham spam qilmasligi uchun:
+                    # ketma-ket 3 ta muvaffaqiyatsiz ulanishdan keyin ham jim kutishga o'tamiz.
+                    stale += 1
+                    if stale >= 3:
+                        kernel_dead = True
+                        stale = 0
+                # 3) Yangi push tekshiriladi; bo'lmasa jim kutish
+                _log_stop_streams.wait(_LOG_POLL_S)
+        threading.Thread(target=_stream, daemon=True).start()
+
 
 
 
@@ -643,12 +994,26 @@ async def nodes_status(_: str = Depends(verify_api_key)):
 @app.post("/register-node")
 async def register_node(req: NodeRegistration, _: str = Depends(verify_node_key)):
     """Kaggle nodlarini registratsiya qilish — NODE_COMM_KEY yoki API_KEY.
-    #3 fix: Node'lar uchun alohida kalit (NODE_COMM_KEY) ishlatiladi.
-    Thread-safe: asyncio.Lock bilan concurrent registratsiyalarni ketma-ketlashtiramiz."""
+    URL o'zgarmagan bo'lsa, keraksiz ish qilmaydi."""
     global KAGGLE_URL, KAGGLE1_URL, KAGGLE2_URL
     global STT_ENDPOINTS, TTS_ENDPOINTS, LLM_ENDPOINT
 
+    # Audit fix: URL validatsiyasi — orchestrator o'sha URL'ga so'rov yuboradi
+    import urllib.parse as _up
+    _p = _up.urlparse(req.url)
+    if _p.scheme not in ("http", "https") or not _p.netloc:
+        raise HTTPException(status_code=400, detail=f"Noto'g'ri URL: {req.url}")
+    if _p.hostname in ("localhost", "127.0.0.1", "::1"):
+        log.warning(f"register-node: localhost URL rad etildi ({req.url})")
+        raise HTTPException(status_code=400, detail="Localhost URL ruxsat etilmaydi")
+
     async with _node_registration_lock:
+        # URL o'zgarmagan bo'lsa — hech narsa qilmaslik
+        prev_url = {"kaggle": KAGGLE_URL, "kaggle1": KAGGLE1_URL, "kaggle2": KAGGLE2_URL}.get(req.node_type)
+        if prev_url == req.url:
+            log.debug(f"Register skip: {req.node_type} URL o'zgarmagan")
+            return {"status": "ok", "message": f"{req.node_type} allaqachon ro'yxatdan o'tgan"}
+
         if req.node_type == "kaggle":
             KAGGLE_URL = req.url
             LLM_ENDPOINT = f"{KAGGLE_URL}/chat"
@@ -671,9 +1036,9 @@ async def register_node(req: NodeRegistration, _: str = Depends(verify_node_key)
     try:
         profile_manager.load_profile("isp_beta")
     except Exception as e:
-        logging.error(f"Profilni yuklashda xatolik: {e}")
+        log.error(f"Profilni yuklashda xatolik: {e}")
 
-    log.info(f"[DISCOVERY] Tugun yangilandi: {req.node_type.upper()} = {req.url}")
+    log.info(f"✅ {req.node_type.upper()} ulandi: {req.url}")
     return {"status": "success", "message": f"{req.node_type} ro'yxatdan o'tdi"}
 
 
@@ -733,7 +1098,9 @@ async def verify_ws_api_key(websocket: WebSocket) -> bool:
 # ----------------- HELPER FUNKSIYALAR (ASYNC) -----------------
 
 async def call_stt_service(language: str, audio_bytes: bytes) -> str:
-    """Audio baytlarni STT tuguniga yuboradi. Filename parametri O'CHIRILDI (C4)."""
+    """Audio baytlarni STT tuguniga yuboradi.
+    Audit fix: node'lar JSON `encrypted_audio` kutadi va `encrypted_text` qaytaradi.
+    (Oldin multipart `audio_file` yuborilar edi → node 422 berardi.)"""
     if not audio_bytes:
         return ""
     lang = (language or "uz").lower()
@@ -745,12 +1112,15 @@ async def call_stt_service(language: str, audio_bytes: bytes) -> str:
         # Format normalizatsiya (C16 / M16): noto'g'ri format STT'da 500 qaytaradi
         normalized_audio = await asyncio.to_thread(ensure_wav_16k_mono, audio_bytes)
         url = STT_ENDPOINTS[lang]
-        files = {"audio_file": ("audio.wav", normalized_audio, "audio/wav")}
-        response = await resilient_request(async_http, url, method="POST", files=files, headers=NODE_HEADERS)
+        encrypted = encrypt_payload(normalized_audio)
+        req_data = {"encrypted_audio": encrypted}
+        response = await resilient_request(async_http, url, method="POST",
+                                           json_body=req_data, headers=NODE_HEADERS)
         data = response.json()
-        if "encrypted_payload" in data:
-            decrypted_bytes = decrypt_payload(data["encrypted_payload"])
-            return json.loads(decrypted_bytes.decode('utf-8')).get("text", "")
+        # Node javobi: {"encrypted_text": "..."}
+        enc_text = data.get("encrypted_text") or data.get("encrypted_payload") or ""
+        if enc_text:
+            return decrypt_payload(enc_text).decode('utf-8').strip()
         return data.get("text", "")
     except Exception as e:
         log.exception(f"STT xatosi [{language}]: {e}")
@@ -789,7 +1159,8 @@ async def call_tts_service(language: str, text: str) -> Optional[bytes]:
     url = TTS_ENDPOINTS[lang]
     payload = {"text": text, "language": lang}
     encrypted_str = encrypt_payload(json.dumps(payload).encode('utf-8'))
-    req_data = {"encrypted_payload": encrypted_str}
+    # Audit fix: node'lar `encrypted_text` kutadi (node-0 ham moslashtirildi)
+    req_data = {"encrypted_text": encrypted_str}
     start_ts = time.perf_counter()
     try:
         response = await resilient_request(async_http, url, method="POST",
@@ -810,73 +1181,357 @@ async def call_tts_service(language: str, text: str) -> Optional[bytes]:
 
 def _wav_to_pcm16k(audio_bytes: bytes) -> bytes:
     """WAV baytlardan PCM 16kHz 16-bit mono raw bytes ajratib oladi.
-    numpy bilan any sample_rate -> 16kHz linear resample.
-    Audio bo'lmagan yoki konversiya xato bergan bo'lsa — b'' qaytaradi
-    (orchestrator None sifatida qabul qiladi va SIP bridge'ga audio yubormaydi).
-    H5 polish: BUG regressiya qilmaslik uchun har qanday failure path'da b''."""
-    if not audio_bytes:
-        return b""
-    try:
-        import io as _io
-        import wave as _wave
-        with _io.BytesIO(audio_bytes) as buf:
-            with _wave.open(buf, "rb") as w:
-                sampwidth = w.getsampwidth()
-                channels = w.getnchannels()
-                framerate = w.getframerate()
-                raw = w.readframes(w.getnframes())
-
-        if sampwidth != 2:
-            try:
-                import audioop
-                if sampwidth == 1:
-                    raw = audioop.bias(raw, 128)
-                if sampwidth == 4:
-                    raw = audioop.lin2lin(raw, 4, 2)
-                sampwidth = 2
-            except Exception as e:
-                log.debug(f"audioop sampwidth convert skip: {e}")
-                return b""
-
-        if channels > 1:
-            try:
-                import audioop
-                raw = audioop.tomono(raw, sampwidth, 1, 0)
-                channels = 1
-            except Exception as e:
-                log.debug(f"audioop tomono skip: {e}")
-                return b""
-
-        if framerate != 16000:
-            try:
-                import numpy as np
-                if sampwidth == 2:
-                    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-                    n = len(samples)
-                    if n == 0:
-                        return b""
-                    target_n = int(round(n * 16000.0 / framerate))
-                    if target_n <= 0:
-                        return b""
-                    xp = np.linspace(0.0, 1.0, num=n)
-                    fp = samples
-                    x = np.linspace(0.0, 1.0, num=target_n)
-                    resampled = np.interp(x, xp, fp)
-                    raw = resampled.astype(np.int16).tobytes()
-                    framerate = 16000
-            except Exception as e:
-                log.debug(f"numpy resample unavailable (Python 3.13 mos): {e}")
-                return b""
-
-        if framerate == 16000 and sampwidth == 2 and channels == 1:
-            return raw
-        return b""
-    except Exception as e:
-        log.warning(f"_wav_to_pcm16k xatosi: {e}")
-        return b""
+    (Yagona audio_utils.wav_to_pcm ga delegatsiya qilinadi.)"""
+    return wav_to_pcm(audio_bytes, 16000)
 
 
 # ----------------- ENDPOINTS -----------------
+
+# ─────────────────── LOG DASHBOARD ROUTES ───────────────────
+
+_LOGS_HTML = r"""<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kaggle Node Loglar</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f8fafc; --surface: #ffffff; --border: #e2e8f0;
+  --text: #1e293b; --text2: #64748b; --text3: #94a3b8;
+  --n0: #059669; --n0bg: #ecfdf5; --n0b: #a7f3d0;
+  --n1: #0891b2; --n1bg: #ecfeff; --n1b: #a5f3fc;
+  --n2: #7c3aed; --n2bg: #f5f3ff; --n2b: #c4b5fd;
+  --radius: 16px; --shadow: 0 1px 3px rgba(0,0,0,.04), 0 1px 2px rgba(0,0,0,.06);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,.06), 0 2px 4px rgba(0,0,0,.04);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+/* HEADER */
+.topbar{background:var(--surface);padding:14px 28px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);box-shadow:var(--shadow);z-index:10}
+.topbar-left{display:flex;align-items:center;gap:12px}
+.topbar-left .logo{font-size:20px}
+.topbar-left h1{font-size:17px;font-weight:700;color:var(--text);letter-spacing:-0.3px}
+.topbar-right{display:flex;align-items:center;gap:20px}
+.clock{font-size:13px;color:var(--text2);font-weight:500;font-family:'JetBrains Mono',monospace;background:var(--bg);padding:6px 14px;border-radius:20px;border:1px solid var(--border)}
+.status-dots{display:flex;gap:14px}
+.status-item{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--text2)}
+.pulse{width:8px;height:8px;border-radius:50%;display:inline-block;animation:pulse 2s infinite}
+.pulse.green{background:var(--n0);box-shadow:0 0 6px var(--n0)}
+.pulse.cyan{background:var(--n1);box-shadow:0 0 6px var(--n1)}
+.pulse.purple{background:var(--n2);box-shadow:0 0 6px var(--n2)}
+.pulse.off{background:#cbd5e1;animation:none;box-shadow:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+.btn{background:var(--surface);color:var(--text);border:1px solid var(--border);padding:8px 18px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;transition:all .2s;display:flex;align-items:center;gap:6px;box-shadow:var(--shadow)}
+.btn:hover{background:#f1f5f9;border-color:#cbd5e1;transform:translateY(-1px);box-shadow:var(--shadow-lg)}
+
+/* GRID */
+.main-grid{display:grid;grid-template-columns:1fr 1fr 1fr;flex:1;gap:16px;padding:16px;overflow:hidden;min-height:0}
+
+/* CARDS */
+.card{display:flex;flex-direction:column;background:var(--surface);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid var(--border);overflow:hidden;transition:box-shadow .2s;min-height:0}
+.card:hover{box-shadow:var(--shadow-lg)}
+.card-head{padding:14px 18px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);flex-shrink:0}
+.card-head .node-label{font-size:14px;font-weight:700;letter-spacing:-0.2px}
+.card-head .node-meta{font-size:11px;color:var(--text2);font-weight:500;font-family:'JetBrains Mono',monospace}
+.card-n0 .card-head{background:linear-gradient(135deg,var(--n0bg),#fff)}
+.card-n0 .node-label{color:var(--n0)}
+.card-n1 .card-head{background:linear-gradient(135deg,var(--n1bg),#fff)}
+.card-n1 .node-label{color:var(--n1)}
+.card-n2 .card-head{background:linear-gradient(135deg,var(--n2bg),#fff)}
+.card-n2 .node-label{color:var(--n2)}
+
+.log-box{flex:1;overflow-y:auto;overflow-x:hidden;padding:14px 18px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:11.5px;line-height:1.7;color:var(--text2);min-height:0;word-break:break-all;white-space:pre-wrap;scroll-behavior:smooth}
+.log-box:empty::after{content:'Kutilmoqda...';color:var(--text3);font-style:italic;font-family:'Inter',sans-serif;font-size:13px}
+.log-box::-webkit-scrollbar{width:5px}
+.log-box::-webkit-scrollbar-track{background:transparent;margin:4px 0}
+.log-box::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:10px}
+.log-box::-webkit-scrollbar-thumb:hover{background:#cbd5e1}
+
+/* LOG LINES */
+.log-line{padding:0.5px 0;transition:background .15s}
+.log-line:hover{background:rgba(0,0,0,.012)}
+.log-line.err{color:#ef4444;font-weight:500}
+.log-line.wrn{color:#f59e0b;font-weight:500}
+.log-line.inf{color:var(--text2)}
+.log-line.ok{color:var(--n0)}
+.log-line.head{color:var(--text);font-weight:600}
+
+/* EMPTY STATE */
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;color:var(--text3);font-family:'Inter',sans-serif;font-size:13px}
+.empty-state .icon{font-size:36px;opacity:.4}
+
+/* RESPONSIVE */
+@media(max-width:1200px){.main-grid{grid-template-columns:1fr 1fr;gap:12px;padding:12px}}
+@media(max-width:768px){.main-grid{grid-template-columns:1fr;gap:10px;padding:10px}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="logo">📊</span>
+    <h1>Kaggle Node Loglar</h1>
+  </div>
+  <div class="topbar-right">
+    <span class="clock" id="clock">--:--:--</span>
+    <div class="status-dots">
+      <span class="status-item"><span class="pulse off" id="dot0"></span>N0</span>
+      <span class="status-item"><span class="pulse off" id="dot1"></span>N1</span>
+      <span class="status-item"><span class="pulse off" id="dot2"></span>N2</span>
+    </div>
+    <button class="btn" onclick="R()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      Yangilash
+    </button>
+  </div>
+</div>
+
+<div class="main-grid">
+  <div class="card card-n0">
+    <div class="card-head"><span class="node-label">🔮 Node-0</span><span class="node-meta" id="m0">LLM+TTS UZ</span></div>
+    <div class="log-box" id="b0"></div>
+  </div>
+  <div class="card card-n1">
+    <div class="card-head"><span class="node-label">🎤 Node-1</span><span class="node-meta" id="m1">STT RU+TTS RU/EN</span></div>
+    <div class="log-box" id="b1"></div>
+  </div>
+  <div class="card card-n2">
+    <div class="card-head"><span class="node-label">🌐 Node-2</span><span class="node-meta" id="m2">STT EN+UZ</span></div>
+    <div class="log-box" id="b2"></div>
+  </div>
+</div>
+
+<script>
+const AS={0:1,1:1,2:1},SS={},CL={'#059669':'ok','#0891b2':'ok','#7c3aed':'ok'};
+function W(l){
+  let c='log-line ';
+  if(/ERROR|XATO|xatolik|❌|Traceback/.test(l))c+='err';
+  else if(/WARNING|WARN|⚠/.test(l))c+='wrn';
+  else if(/✅|🎉|tayyor|ulandi|Tunnel:|GPU soni/.test(l))c+='ok';
+  else if(/──|ishga tushdi|Modellar:/.test(l))c+='head';
+  else c+='inf';
+  return `<div class="${c}">${l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+}
+function X(id){
+  if(SS[id])SS[id].close();
+  SS[id]=new EventSource('/logs/stream/'+id);
+  const b=document.getElementById('b'+id),m=document.getElementById('m'+id),d=document.getElementById('dot'+id);
+  SS[id].onmessage=e=>{
+    try{
+      const p=JSON.parse(e.data);
+      if(p.type==='full'){b.innerHTML=p.data.split('\n').map(W).join('');if(AS[id])b.scrollTop=b.scrollHeight}
+      if(p.type==='line'){
+        b.insertAdjacentHTML('beforeend',W(p.data));
+        if(p.data.includes('tushdi:')){const t=p.data.match(/(\d{2}:\d{2}:\d{2})/);if(t)m.textContent='🟢 '+t[1];d.className='pulse green';d.parentElement.style.color='var(--n0)'}
+        if(p.data.includes('to\u02bbtadi')){d.className='pulse off';d.parentElement.style.color='var(--text2)'}
+        if(AS[id]&&b.scrollHeight-b.scrollTop-b.clientHeight<120)b.scrollTop=b.scrollHeight;
+      }
+    }catch(ex){}
+  };
+  SS[id].onerror=()=>{d.className='pulse off';d.parentElement.style.color='var(--text2)'};
+}
+[0,1,2].forEach(id=>{document.getElementById('b'+id).addEventListener('scroll',function(){AS[id]=(this.scrollHeight-this.scrollTop-this.clientHeight)<80})});
+function R(){[0,1,2].forEach(id=>{document.getElementById('b'+id).innerHTML='';X(id)})}
+function T(){const n=new Date();document.getElementById('clock').textContent=n.toLocaleTimeString('uz-UZ',{hour12:false})}
+setInterval(T,1000);T();R();
+</script>
+</body></html>"""
+
+
+@app.get("/logs", response_class=HTMLResponse)
+async def log_dashboard():
+    static_file = os.path.join(os.path.dirname(__file__), "static", "logs.html")
+    if os.path.exists(static_file):
+        return FileResponse(static_file, media_type="text/html")
+    return HTMLResponse(content="<h1>logs.html topilmadi</h1>", status_code=404)
+
+
+# ─────────────────── KAGGLE ACTIONS (DASHBOARD TUGMALARI) ───────────────────
+# launch_kaggle.py ni background'da ishga tushiradi: --all / -d / -i / -m
+# XAVFSIZLIK: bu tugmalar -d (kernel o'chirish) va --all (GPU kvota yondirish)
+# kabi DESTRUCTIVE amallarni ishga tushiradi — maxsus kalit talab qilinadi.
+_kaggle_jobs: Dict[str, dict] = {}
+_kaggle_jobs_lock = threading.Lock()
+_kaggle_procs: Dict[str, "subprocess.Popen"] = {}  # noqa: F821
+_kaggle_jobs_MAX = 20  # eski job'lar xotirada qolmasligi uchun
+
+# Amallar kaliti: DASHBOARD_ACTION_KEY -> NODE_COMM_KEY -> API_KEY
+_ACTION_KEY = (os.getenv("DASHBOARD_ACTION_KEY") or NODE_COMM_KEY or API_KEY or "")
+
+
+async def verify_action_key(x_action_key: Optional[str] = Header(default=None)):
+    """Dashboard amallari uchun alohida kalit — o'qish (logs) kalitdan farqli."""
+    if _ACTION_KEY and x_action_key and x_action_key == _ACTION_KEY:
+        return x_action_key
+    raise HTTPException(status_code=403, detail="Xavfsizlik: Amallar kaliti noto'g'ri!")
+
+
+def _prune_kaggle_jobs():
+    """Eski tugagan job'larni tozalash — xotira o'smasligi uchun."""
+    with _kaggle_jobs_lock:
+        done = [j for j, d in _kaggle_jobs.items() if d.get("status") in ("done", "error")]
+        if len(done) > _kaggle_jobs_MAX:
+            for jid in done[: -_kaggle_jobs_MAX]:
+                _kaggle_jobs.pop(jid, None)
+
+
+def _start_kaggle_job(flag: str) -> str:
+    """launch_kaggle.py flag'ini background subprocess sifatida ishga tushiradi.
+    Qaytaradi: job_id — holatni /api/kaggle/job/{id} orqali so'rash mumkin."""
+    job_id = uuid.uuid4().hex[:8]
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch_kaggle.py")
+    with _kaggle_jobs_lock:
+        _kaggle_jobs[job_id] = {"flag": flag, "status": "starting", "output": [], "exit": None}
+    _prune_kaggle_jobs()
+
+    def _run():
+        import subprocess as _sp
+        env = os.environ.copy()
+        # sudo bilan ishlaganda kaggle CLI ~/.local/bin da — PATH'ga qo'shamiz
+        env["PATH"] = "/home/ubuntu/.local/bin:" + env.get("PATH", "")
+        proc = None
+        try:
+            proc = _sp.Popen([sys.executable, script, flag],
+                stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, env=env,
+                bufsize=1, cwd=os.path.dirname(script))
+            with _kaggle_jobs_lock:
+                _kaggle_procs[job_id] = proc
+                _kaggle_jobs[job_id]["status"] = "running"
+            for raw in iter(proc.stdout.readline, ""):
+                line = raw.rstrip("\n").rstrip("\r")
+                if not line:
+                    continue
+                with _kaggle_jobs_lock:
+                    _kaggle_jobs[job_id]["output"].append(line)
+                    if len(_kaggle_jobs[job_id]["output"]) > 2000:
+                        _kaggle_jobs[job_id]["output"] = _kaggle_jobs[job_id]["output"][-2000:]
+            rc = proc.wait(timeout=10)
+            with _kaggle_jobs_lock:
+                _kaggle_jobs[job_id]["status"] = "done"
+                _kaggle_jobs[job_id]["exit"] = rc
+                _kaggle_procs.pop(job_id, None)
+        except Exception as e:
+            with _kaggle_jobs_lock:
+                _kaggle_jobs[job_id]["status"] = "error"
+                _kaggle_jobs[job_id]["output"].append(f"❌ Xatolik: {e}")
+                _kaggle_procs.pop(job_id, None)
+            if proc:
+                try: proc.kill()
+                except Exception: pass
+    threading.Thread(target=_run, daemon=True).start()
+    return job_id
+
+
+@app.post("/api/kaggle/action")
+async def kaggle_action(request: Request, _: str = Depends(verify_action_key)):
+    """Dashboard tugmalari: {flag: '--all' | '-d' | '-i' | '-m'}"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    flag = body.get("flag", "")
+    if flag not in ("--all", "-d", "-i", "-m"):
+        return {"error": f"Noto'g'ri flag: {flag}"}
+    job_id = _start_kaggle_job(flag)
+    return {"job_id": job_id, "flag": flag}
+
+
+@app.get("/api/kaggle/job/{job_id}")
+async def kaggle_job_status(job_id: str, _: str = Depends(verify_action_key)):
+    """Job holati — frontend polling qiladi."""
+    with _kaggle_jobs_lock:
+        job = _kaggle_jobs.get(job_id)
+    if not job:
+        return {"error": "Job topilmadi"}
+    return job
+
+
+@app.get("/logs/stream/orch")
+async def log_stream_orch(request: Request):
+    """Orchestrator o'z loglarini SSE orqali uzatish — web paneldagi 4-panel."""
+    q: _queue.Queue = _queue.Queue(maxsize=200)
+    _orch_subs.append(q)
+
+    async def gen():
+        if _orch_buffer:
+            msg = json.dumps({"type": "full", "data": "\n".join(_orch_buffer)})
+            yield f"data: {msg}\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.to_thread(q.get, timeout=3)
+                    yield f"data: {json.dumps(msg)}\n\n"
+                except _queue.Empty:
+                    yield ":\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if q in _orch_subs:
+                _orch_subs.remove(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+
+@app.get("/logs/stream/{node_id}")
+async def log_stream(node_id: int, request: Request):
+    if node_id not in (0, 1, 2):
+        return StreamingResponse(iter([]), media_type="text/event-stream")
+    q: _queue.Queue = _queue.Queue(maxsize=200)
+    _log_subs[node_id].append(q)
+    async def gen():
+        if _log_buffers[node_id]:
+            msg = json.dumps({"type":"full","data":"\n".join(_log_buffers[node_id])})
+            yield f"data: {msg}\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    # asyncio.to_thread — event loop'ni bloklamaydi
+                    msg = await asyncio.to_thread(q.get, timeout=3)
+                    yield f"data: {json.dumps(msg)}\n\n"
+                except _queue.Empty:
+                    yield ":\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if q in _log_subs[node_id]:
+                _log_subs[node_id].remove(q)
+    return StreamingResponse(gen(), media_type="text/event-stream",
+        headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
+
+
+@app.post("/logs/clear")
+async def log_clear():
+    """Barcha node log bufferlarini tozalaydi — 'Tozalash' tugmasi chaqiradi.
+    Buffer tozalangach 'Yangilash' bosilsa eski loglar qaytib kelmaydi.
+    Ulangan barcha clientlarga 'clear' xabari yuboriladi — boshqa ochiq
+    sahifalar ham bir vaqtda tozalanadi. Stream'lar davom etadi, yangi
+    loglar kelishda davom qiladi."""
+    for nid in (0, 1, 2):
+        with _log_buffers_lock:
+            _log_buffers[nid].clear()
+        msg = {"type": "clear"}
+        for q in list(_log_subs[nid]):
+            try:
+                q.put_nowait(msg)
+            except _queue.Full:
+                pass
+    # Orchestrator o'z loglarini ham tozalash
+    with _log_buffers_lock:
+        _orch_buffer.clear()
+    for q in list(_orch_subs):
+        try:
+            q.put_nowait({"type": "clear"})
+        except _queue.Full:
+            pass
+    log.info("Log dashboard: barcha bufferlar tozalandi")
+    return {"status": "ok", "cleared": [0, 1, 2]}
+
 
 @app.get("/metrics")
 async def metrics(x_api_key: Optional[str] = Header(default=None)):
@@ -1090,9 +1745,11 @@ async def websocket_call(
 ):
     """Real-time streaming WebSocket pipeline.
 
-    C8 fix: API key endi talab qilinadi.
-    M8 fix: til validatsiyasi qilingan.
-    M13 fix: audio_buffer maksimal hajmiga ega (OOM oldini olish).
+    Audit refactor: WS path endi stream_controller orqali ishlaydi — SIP path
+    bilan BIR xil pipeline (VAD→STT→Guardrail→LLM+Tools→TTS).
+    - Guardrail, tool loop va tilga mos profil endi WS path'da ham ishlaydi.
+    - Audio serializatsiya: bir call uchun pipeline ketma-ket (asyncio.Lock).
+    - Redis tushsa in-memory fallback (audit fix).
     """
     # 1. AUTH (C8)
     if not await verify_ws_api_key(websocket):
@@ -1109,30 +1766,45 @@ async def websocket_call(
 
     await websocket.accept()
 
-    # 2. LOAD BALANCING (Redis TTL fix — H3)
+    # 2. LOAD BALANCING (Redis + lokal fallback)
     slot_acquired = False
     try:
-        current_calls = await asyncio.to_thread(redis_client.incr, "active_calls")
-        # INCR + EXPIRE atomic emas, lekin EXPIRE INCR'dan keyin bo'lsa OK
-        await asyncio.to_thread(redis_client.expire, "active_calls", ACTIVE_CALLS_TTL)
+        current_calls = await _redis_incr_active()
         if current_calls > MAX_CONCURRENT_CALLS:
-            await asyncio.to_thread(redis_client.decr, "active_calls")
+            await _redis_decr_active()
             await websocket.close(code=1013, reason="Server is too busy")
             return
         slot_acquired = True
         with _analytics_lock:
             analytics_db["active_calls"] += 1
-        _bump_analytics(lang, 0.0)
     except Exception as e:
-        log.exception(f"Redis xatosi: {e}")
+        log.exception(f"Active-call counter xatosi: {e}")
         await websocket.close(code=1011, reason="Internal error")
         return
 
     start_time = time.time()
-    audio_buffer = bytearray()
-    MAX_BUFFER_SIZE = 32000 * 10  # ~10 sekund audio, undan ko'p bo'lsa reset
-
     correlation_external_id = None  # SIP bridge'dan kelgan CallSid mapping
+
+    # ── StreamController orqali pipeline ──
+    session = stream_controller.get_or_create_session(caller_id)
+    session.language = lang
+    session.sample_rate = 16000   # WS client PCM 16kHz kutadi
+    send_q: asyncio.Queue = asyncio.Queue()
+
+    def _on_tts(pcm: bytes):
+        """TTS natijasini WS klientga yuborish uchun queue'ga tashlaymiz."""
+        send_q.put_nowait(pcm)
+
+    async def _drain_tts():
+        """send_q ni bo'shatib, PCM'ni websocket orqali uzatadi."""
+        while True:
+            pcm = await send_q.get()
+            try:
+                await websocket.send_bytes(pcm)
+            except Exception:
+                return
+
+    drain_task = asyncio.create_task(_drain_tts())
 
     try:
         # Boshlanish signalini yuborish (SIP bridge sinxronizatsiya uchun)
@@ -1141,68 +1813,59 @@ async def websocket_call(
         while True:
             # receive_bytes() o'rniga receive() — text (JSON metadata) yoki bytes bo'lishi mumkin
             msg = await websocket.receive()
+            # Client yopilganda Starlette 'websocket.disconnect' qaytaradi — shu yerda
+            # aylanishni to'xtatamiz (aks holda "Cannot call receive once a disconnect
+            # message has been received" xatosi paydo bo'lardi).
+            if msg.get("type") == "websocket.disconnect":
+                break
             if msg.get("type") != "websocket.receive":
                 continue
 
             if "text" in msg and msg["text"]:
-                # JSON control message (SIP bridge'dan metadata)
+                # JSON control message (SIP bridge'dan metadata / DTMF)
                 try:
                     parsed = json.loads(msg["text"])
-                    if isinstance(parsed, dict) and parsed.get("type") == "metadata":
-                        correlation_external_id = parsed.get("external_id") or parsed.get("stream_sid")
-                        if correlation_external_id:
-                            _record_external_id(caller_id, correlation_external_id)
-                            log.info(f"[{caller_id}] SIP correlation: external_id={correlation_external_id}")
                 except Exception as e:
                     log.debug(f"WS text parse: {e}")
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                ctype = parsed.get("type")
+                if ctype == "metadata":
+                    correlation_external_id = parsed.get("external_id") or parsed.get("stream_sid")
+                    if correlation_external_id:
+                        _record_external_id(caller_id, correlation_external_id)
+                        log.info(f"[{caller_id}] SIP correlation: external_id={correlation_external_id}")
+                    # Twilio `from` raqami — caller_name sifatida system prompt'ga boradi
+                    caller = (parsed.get("caller") or "").strip()
+                    if caller:
+                        session.caller_name = caller
+                elif ctype == "dtmf":
+                    digit = parsed.get("digit", "")
+                    lang_map = {"1": "uz", "2": "ru", "3": "en"}
+                    if digit in lang_map:
+                        session.language = lang_map[digit]
+                        log.info(f"[{caller_id}] DTMF {digit} → til: {session.language}")
+                        # Birinchi til tanlovidan keyin greeting (SIP trunk'dagi kabi)
+                        if not getattr(session, "_greeting_done", False):
+                            session._greeting_done = True
+                            stream_controller.trigger_greeting(caller_id, _on_tts)
                 continue
 
             if "bytes" not in msg or not msg["bytes"]:
                 continue
 
-            data = msg["bytes"]
-
-            # M13 / H3: buffer overflow himoyasi
-            if len(audio_buffer) + len(data) > MAX_BUFFER_SIZE:
-                # eski audio'ni tashlaymiz — caller_id uzoq jim turgan bo'lsa kerak
-                audio_buffer.clear()
-
-            audio_buffer.extend(data)
-
-            # VAD tekshiruvi: sukut aniqlanganda va buffer 1+ sekund
-            if not vad_model.is_speech(data) and len(audio_buffer) >= 32000:
-                transcribed_text = await call_stt_service(lang, bytes(audio_buffer))
-
-                if transcribed_text.strip() and transcribed_text.strip() != "[Ovoz eshitilmadi]":
-                    session_manager.add_message(caller_id, "user", transcribed_text)
-                    chat_history = session_manager.get_session(caller_id)
-                    llm_response_text = await call_llm_service(chat_history)
-                    session_manager.add_message(caller_id, "assistant", llm_response_text)
-                    audio_response = await call_tts_service(lang, llm_response_text)
-
-                    await websocket.send_json({
-                        "type": "text",
-                        "transcribed": transcribed_text,
-                        "ai_response": llm_response_text,
-                    })
-                    if audio_response:
-                        await websocket.send_bytes(audio_response)
-                else:
-                    await websocket.send_json({"type": "text", "transcribed": "", "ai_response": ""})
-
-                audio_buffer.clear()
+            # VAD + suhbat segmentatsiyasi + STT/LLM/TTS — stream_controller'da
+            stream_controller.on_audio_chunk(caller_id, msg["bytes"], _on_tts)
     except WebSocketDisconnect:
         log.info(f"[{caller_id}] WebSocket uzildi.")
     except Exception as e:
         log.exception(f"[{caller_id}] WebSocket xatosi: {e}")
     finally:
-        # M13 fix: history trim + audio_buffer clear
-        audio_buffer.clear()
+        drain_task.cancel()
+        stream_controller.end_call(caller_id)
         if slot_acquired:
-            try:
-                await asyncio.to_thread(redis_client.decr, "active_calls")
-            except Exception:
-                pass
+            await _redis_decr_active()
         with _analytics_lock:
             analytics_db["active_calls"] = max(0, analytics_db["active_calls"] - 1)
         duration = time.time() - start_time
@@ -1296,7 +1959,7 @@ def _record_success(url: str):
         cb["failures"] = 0
         cb["open"] = False
 
-HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "15"))
+HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "600"))
 _node_health_status: Dict[str, str] = {}
 _node_health_lock = threading.Lock()
 
@@ -1331,10 +1994,11 @@ async def _node_health_monitor():
                         _record_failure(health_url)
                         with _node_health_lock:
                             _node_health_status[name] = f"HTTP {res.status_code}"
-                except Exception:
+                except Exception as e:
                     _record_failure(health_url)
                     with _node_health_lock:
                         _node_health_status[name] = "OFFLINE"
+                    log.debug(f"Health check [{name}]: {e}")
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -1481,7 +2145,8 @@ async def reset_session(caller_id: str, _: str = Depends(verify_api_key)):
 
 # ----------------- SETTINGS -----------------
 @app.get("/api/settings/network")
-async def get_network_settings():
+async def get_network_settings(_: str = Depends(verify_api_key)):
+    """Audit fix: settings GET ham auth talab qiladi (avval ochiq edi)."""
     return settings_db["network"]
 
 
@@ -1492,7 +2157,8 @@ async def update_network_settings(setting: NetworkSetting, _: str = Depends(veri
 
 
 @app.get("/api/settings/services")
-async def get_services():
+async def get_services(_: str = Depends(verify_api_key)):
+    """Audit fix: settings GET ham auth talab qiladi (avval ochiq edi)."""
     return settings_db["services"]
 
 

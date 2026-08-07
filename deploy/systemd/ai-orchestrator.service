@@ -1,0 +1,15 @@
+[Unit]
+Description=AI Orchestrator Service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ai-operator/orchestrator
+EnvironmentFile=/home/ubuntu/ai-operator/.env
+ExecStart=/usr/bin/uvicorn main:app --host 0.0.0.0 --port 8080
+Restart=always
+Environment="PYTHONPATH=/home/ubuntu/ai-operator"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+
+[Install]
+WantedBy=multi-user.target

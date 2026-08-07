@@ -1,0 +1,21 @@
+# ⚠️ DIQQAT: Bu unit ai-operator loyihasiga EMAS, alohida loyihaga tegishli:
+#   /home/ubuntu/ai-model (Football AI Webhook — 8000 port).
+# Yangi serverda bu loyiha ko'chirilmasa, bu faylni ishlatish shart emas.
+[Unit]
+Description=Football AI Webhook Server (FastAPI)
+After=network.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ai-model
+ExecStart=/home/ubuntu/ai-model/.venv/bin/uvicorn src.api.webhook:app --host 0.0.0.0 --port 8000 --log-level info
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

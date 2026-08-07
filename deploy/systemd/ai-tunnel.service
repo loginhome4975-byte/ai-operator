@@ -1,0 +1,13 @@
+[Unit]
+Description=AI LocalTunnel
+After=ai-orchestrator.service
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ai-operator
+ExecStart=/usr/bin/npx localtunnel --port 8080 --subdomain ai-orchestrator-152
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

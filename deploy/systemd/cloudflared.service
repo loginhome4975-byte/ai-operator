@@ -1,0 +1,13 @@
+[Unit]
+Description=Cloudflare Tunnel (traffix.uz)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudflared tunnel --config /home/ubuntu/.cloudflared/config.yml run 1c95c754-7572-4f1f-ba81-242c7cbecffb
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

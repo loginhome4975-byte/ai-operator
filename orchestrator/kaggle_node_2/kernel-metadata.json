@@ -1,0 +1,14 @@
+{
+  "id": "bunyodbekozodboyev/ai-operator-kaggle-node-2",
+  "title": "ai-operator-kaggle-node-2",
+  "code_file": "run_server.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "machine_shape": "NvidiaTeslaT4x2",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

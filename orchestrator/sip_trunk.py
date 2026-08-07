@@ -21,7 +21,9 @@ def get_digest_auth_qop(username, password, realm, nonce, uri, cnonce, nc="00000
     return response
 
 async def register_loop(config, transport):
-    call_id = f"reg-{int(time.time())}"
+    # Audit fix: Call-ID registratsiyalar orasida BARQAROR bo'lishi kerak —
+    # ba'zi SIP server'lar har re-register'da yangi Call-ID ni rad etadi.
+    call_id = f"reg-{uuid.uuid4().hex[:12]}"
     cseq = 1
     # DNS cache — har registratsiyada qayta lookup qilmaslik
     _cached_ip = None

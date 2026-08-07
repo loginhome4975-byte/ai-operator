@@ -39,6 +39,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
         self.dtmf_buffer = set()
         self._ssrc = SSRCGenerator.generate()
         self.call_state = "MENU"
+        self._marker_next = True   # RTP marker bit faqat birinchi paketda bo'ladi
 
     def connection_made(self, transport):
         self.transport = transport
@@ -77,6 +78,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
 
     def play_file(self, filename, max_loops=0):
         self.stop_playback()
+        self._marker_next = True
         self.play_task = asyncio.create_task(self._play_loop(filename, max_loops))
 
     def stop_playback(self):
@@ -117,7 +119,10 @@ class RTPProtocol(asyncio.DatagramProtocol):
                 ulaw_data = audioop.lin2ulaw(pcm_data, 2)
                 self.sequence_number = (self.sequence_number + 1) % 65536
                 self.timestamp = (self.timestamp + len(ulaw_data)) & 0xFFFFFFFF
-                header = struct.pack("!BBHII", 0x80, 0x00, self.sequence_number, self.timestamp, self._ssrc) 
+                # Audit fix: marker bit (0x80) faqat birinchi paketda bo'ladi
+                marker = 0x80 if self._marker_next else 0x00
+                self._marker_next = False
+                header = struct.pack("!BBHII", 0x80 | marker, 0x00, self.sequence_number, self.timestamp, self._ssrc)
                 self.transport.sendto(header + ulaw_data, self.remote_addr)
             except Exception as e:
                 logging.warning(f"[RTP] Audio jo'natishda xatolik call={self.call_id}: {e}")
@@ -164,6 +169,11 @@ class SIPLogic:
         if first_line.startswith('INVITE'):
             logging.info(f"[SIP] 📞 Yangi qo'ng'iroq (INVITE): {call_id} | {addr}")
             asyncio.create_task(self.handle_invite(msg, headers, addr, call_id, transport, is_tcp))
+            
+        elif first_line.startswith('CANCEL'):
+            # Audit fix: CANCEL ishlanmay qolmasin — 487 qaytaramiz va call tozalanadi
+            logging.info(f"[SIP] ❌ Qo'ng'iroq bekor qilindi (CANCEL): {call_id}")
+            self.handle_cancel(headers, addr, call_id, transport, is_tcp)
             
         elif first_line.startswith('BYE'):
             logging.info(f"[SIP] 🔴 Qo'ng'iroq yakunlandi (BYE): {call_id}")
@@ -251,6 +261,8 @@ class SIPLogic:
             elif digit == '3': lang = "en"
             
             proto.call_state = "WAITING"
+            proto.dtmf_buffer.clear()  # audit fix: yangi call holatiga o'tishda tozalanadi
+            proto._marker_next = True
             proto.play_file('orchestrator/wait.wav', max_loops=0)
             asyncio.create_task(self.init_llm_and_start(call_id, lang, proto))
 
@@ -320,6 +332,30 @@ class SIPLogic:
                     del self.active_calls[call_id]
                     stream_controller.end_call(call_id)
 
+    def handle_cancel(self, headers, addr, call_id, transport, is_tcp):
+        """CANCEL: 487 Request Terminated qaytaramiz, dialoglarni tozalaymiz."""
+        if call_id in self.active_calls:
+            try:
+                self.active_calls[call_id]['rtp_transport'].close()
+            except Exception:
+                pass
+            del self.active_calls[call_id]
+            stream_controller.end_call(call_id)
+        via = headers.get('via', '')
+        fro = headers.get('from', '')
+        to = headers.get('to', '')
+        cseq = headers.get('cseq', '')
+        response = (
+            f"SIP/2.0 487 Request Terminated\r\n"
+            f"Via: {via}\r\n"
+            f"From: {fro}\r\n"
+            f"To: {to}\r\n"
+            f"Call-ID: {call_id}\r\n"
+            f"CSeq: {cseq}\r\n"
+            "Content-Length: 0\r\n\r\n"
+        )
+        self.send_response(transport, response, addr, is_tcp)
+
     def handle_bye(self, raw_msg, headers, addr, call_id, transport, is_tcp):
         if call_id in self.active_calls:
             self.active_calls[call_id]['rtp_transport'].close()
@@ -364,9 +400,32 @@ class SIPTCPProtocol(asyncio.Protocol):
         self.addr = transport.get_extra_info('peername')
     def data_received(self, data):
         self.buffer += data
-        if b"\r\n\r\n" in self.buffer:
-            self.logic.handle_sip_message(self.buffer, self.addr, self.transport, is_tcp=True)
-            self.buffer = b""
+        # Audit fix: bitta TCP paketda 2+ SIP xabari bo'lsa ham qayta ishlanadi
+        while True:
+            idx = self.buffer.find(b"\r\n\r\n")
+            if idx < 0:
+                break
+            msg = self.buffer[:idx + 4]
+            self.buffer = self.buffer[idx + 4:]
+            try:
+                self.logic.handle_sip_message(msg, self.addr, self.transport, is_tcp=True)
+            except Exception as e:
+                logging.warning(f"[SIP] TCP message xatosi: {e}")
+
+def _detect_ip():
+    """SERVER_IP berilmagan bo'lsa, tashqi ulanish orqali server IP'ni aniqlaydi.
+    SDP'da 0.0.0.0 yuborilsa mijoz RTP jo'nata olmaydi — shu sababli autodetect kerak."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("0.0.0.0"):
+            return ip
+    except Exception:
+        pass
+    return "0.0.0.0"
+
 
 async def main():
     loop = asyncio.get_running_loop()
@@ -380,7 +439,7 @@ async def main():
             "(linphone.org akkaunt ma'lumotlari)."
         )
     _sip_port = int(os.environ.get("SIP_LOCAL_PORT", "5060"))
-    _server_ip = os.environ.get("SERVER_IP", "0.0.0.0")
+    _server_ip = os.environ.get("SERVER_IP") or _detect_ip()
     trunk_config = SIPTrunkConfig(
         username=_u,
         password=_p,

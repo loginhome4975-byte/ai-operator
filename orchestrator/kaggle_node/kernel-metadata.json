@@ -1,0 +1,16 @@
+{
+  "id": "bunyodbek7/ai-operator-kaggle-node",
+  "title": "ai-operator-kaggle-node",
+  "code_file": "run_server.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "machine_shape": "NvidiaTeslaT4x2",
+  "dataset_sources": [
+    "bunyodbek7/miyya-qwen-7b"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

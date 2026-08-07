@@ -8,7 +8,8 @@
     "logs": "node scripts/log_stream.mjs",
     "logs:0": "node scripts/log_stream.mjs --node 0",
     "logs:1": "node scripts/log_stream.mjs --node 1",
-    "logs:2": "node scripts/log_stream.mjs --node 2"
+    "logs:2": "node scripts/log_stream.mjs --node 2",
+    "logs:web": "python3 scripts/log_server.py"
   },
   "repository": {
     "type": "git",
