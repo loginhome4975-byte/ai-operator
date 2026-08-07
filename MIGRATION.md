@@ -3,7 +3,8 @@
 > **Sana:** 2026-08-07
 > **Maqsad:** Hozirgi serverdagi AI Operator loyihasiga bog'langan HAMMA narsani yangi serverga 1:1 ko'chirish uchun qo'llanma.
 > **Muhim:** Ushbu hujjatda maxfiy qiymatlar (`<YASHIRIN>`) ko'rinishida berilgan. Haqiqiy qiymatlar backup arxivda:
-> `/home/ubuntu/ai-operator-migration-20260807.tar.gz` (eski serverda).
+> `backup/ai-operator-migration-20260807.tar.gz` (loyiha ichida, git'da).
+> 🔒 Eslatma: arxiv ichida REAL maxfiy fayllar bor (`.env`, tunnel token, HF tokenli eski node kodlar) — repo **private** bo'lishi shart!
 
 ---
 
@@ -464,7 +465,7 @@ SIP bridge (`orchestrator/sip/requirements.txt`): `fastapi, uvicorn, websockets`
 
 ## 13. Backup arxiv tarkibi
 
-Fayl: **`/home/ubuntu/ai-operator-migration-20260807.tar.gz`** (~19 MB)
+Fayl: **`backup/ai-operator-migration-20260807.tar.gz`** (~19 MB) — loyiha ichida
 
 ```
 ai-operator-migration-staging/
